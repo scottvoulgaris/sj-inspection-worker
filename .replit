@@ -30,7 +30,7 @@ args = "node index.js"
 outputType = "console"
 
 [deployment]
-deploymentTarget = "vm"
+deploymentTarget = "cloudrun"
 run = ["node", "index.js"]
 
 [userenv]
@@ -40,3 +40,7 @@ CONTROL_APP_URL = "https://inspection-scheduler-accelerator.replit.app/"
 DRY_RUN = "false"
 PORTAL_USERNAME = "permits@aro.homes"
 PORTAL_PASSWORD = "Aroconstruction1"
+
+[[ports]]
+localPort = 3000
+externalPort = 80

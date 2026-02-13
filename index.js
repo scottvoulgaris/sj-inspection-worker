@@ -1,3 +1,4 @@
+const express = require('express');
 const { mainLoop } = require('./src/worker');
 const { closeBrowser } = require('./src/browser');
 const logger = require('./src/logger');
@@ -26,6 +27,17 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('uncaughtException', (err) => {
   logger.error('Uncaught exception', err.message);
+});
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('Worker running');
+});
+
+app.listen(PORT, () => {
+  logger.info(`Health server listening on port ${PORT}`);
 });
 
 validateEnv();
