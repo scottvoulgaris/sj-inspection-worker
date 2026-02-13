@@ -34,14 +34,33 @@ async function login(page) {
   logger.info('Navigating to login page');
   await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded' });
 
-  await page.fill('input[name="email"], input[type="email"], #email, input[name="username"]', config.portal.username);
+  const usernameSelector = 'input[name="email"], input[type="email"], #email, input[name="username"], input[name="userid"], input[type="text"]';
+  try {
+    await page.waitForSelector(usernameSelector, { timeout: 60_000 });
+    logger.info('Login page loaded successfully');
+  } catch {
+    await takeScreenshot(page, 'login-form-not-found');
+    logger.error('Login form not found');
+    throw new Error('Login form not found — username field did not appear within 60s');
+  }
+
+  await page.fill(usernameSelector, config.portal.username);
   await page.fill('input[name="password"], input[type="password"], #password', config.portal.password);
 
-  await page.click('input[type="submit"], button[type="submit"], #loginButton, .login-btn');
-  await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timing.navigationTimeoutMs });
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null),
+    page.click('input[type="submit"], button[type="submit"], #loginButton, .login-btn, button:has-text("Sign in"), input[value="Sign in"]'),
+  ]);
+
+  await page.waitForTimeout(3_000);
 
   const url = page.url();
-  const isLoggedIn = !url.includes('login');
+  const bodyText = await page.textContent('body').catch(() => '');
+  const isLoggedIn =
+    (!url.includes('Login') && !url.includes('login')) ||
+    bodyText.includes('MY SERVICES') ||
+    bodyText.includes('My Permits') ||
+    bodyText.includes('Sign Out');
   if (!isLoggedIn) {
     await takeScreenshot(page, 'login-failed');
     throw new Error('Login failed – still on login page after submit');
