@@ -21,17 +21,28 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `worker.js` — Main loop with retry logic, backoff, jitter, and heartbeat
 
 ### Key Functions
-- `login(page)` — Authenticates with the San José portal
-- `getAvailableDates(page)` — Extracts dates from inspection scheduling dropdown
+- `login(page)` — Authenticates with the San José portal via portal.sanjoseca.gov
+- `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), finds matching file number hyperlink (converts dashes to spaces for matching), clicks it to reach the scheduling page. Returns `{ inspPage, permitNumber }` where inspPage is the popup Page.
+- `getAvailableDates(page)` — Smart-detects date dropdown by scanning all `<select>` elements for date-like options (day/month names or numeric dates). Extracts and sorts available dates.
 - `rescheduleInspection(page, targetDate)` — Attempts to reschedule to an earlier date
 - `mainLoop()` — Infinite loop: fetch inspections → process each → heartbeat → pause → repeat
 
+### Portal Navigation Flow
+1. Login at portal.sanjoseca.gov
+2. Click "Manage Inspections (Bldg & Fire)" button → opens popup window
+3. In popup: find file number hyperlink matching permit (e.g. "2026 103016 RS" matches "2026-103016-RS")
+4. Click file number → lands on "Scheduling or Changing Inspection Requests" page
+5. Extract available dates from dropdown, compare with current scheduled date
+6. If earlier date available and not in dry-run mode, reschedule
+
 ### Features
+- Popup window handling for Manage Inspections page
 - Exponential backoff with jitter on failures
 - Session expiration detection and automatic re-login
 - Screenshot capture on every reschedule attempt and on errors
 - Heartbeat sent to control API every cycle
 - Graceful shutdown on SIGINT/SIGTERM
+- Dry run mode (default) prevents accidental rescheduling
 
 ## Required Environment Variables
 - `PORTAL_USERNAME` — San José portal login username

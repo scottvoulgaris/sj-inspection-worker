@@ -30,8 +30,8 @@ async function processInspection(page, inspection) {
     await login(page);
   }
 
-  await navigateToInspections(page, permitNumber);
-  const availableDates = await getAvailableDates(page);
+  const { inspPage } = await navigateToInspections(page, permitNumber);
+  const availableDates = await getAvailableDates(inspPage);
 
   if (availableDates.length === 0) {
     logger.info(`No available dates for inspection ${id} (permit ${permitNumber})`);
@@ -72,7 +72,7 @@ async function processInspection(page, inspection) {
     };
   }
 
-  const result = await rescheduleInspection(page, targetDate);
+  const result = await rescheduleInspection(inspPage, targetDate);
 
   return {
     inspectionId: id,
