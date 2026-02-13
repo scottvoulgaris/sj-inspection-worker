@@ -22,8 +22,8 @@ function backoffDelay(attempt) {
 }
 
 async function processInspection(page, inspection) {
-  const { permitNumber, inspectionId, currentDate } = inspection;
-  logger.info(`Processing inspection ${inspectionId} for permit ${permitNumber}`);
+  const { id, permitNumber, projectName, inspectionType, currentScheduledDate, desiredDate } = inspection;
+  logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
 
   if (isSessionExpired(page)) {
     logger.info('Session expired, re-authenticating');
@@ -34,39 +34,39 @@ async function processInspection(page, inspection) {
   const availableDates = await getAvailableDates(page);
 
   if (availableDates.length === 0) {
-    logger.info(`No available dates for inspection ${inspectionId}`);
+    logger.info(`No available dates for inspection ${id} (permit ${permitNumber})`);
     return {
-      inspectionId,
+      inspectionId: id,
       permitNumber,
       status: 'no_dates_available',
       availableDates: [],
     };
   }
 
-  const currentDateObj = new Date(currentDate);
+  const currentDateObj = new Date(currentScheduledDate);
   const earlierDates = availableDates.filter((d) => d.date < currentDateObj);
 
   if (earlierDates.length === 0) {
-    logger.info(`No earlier dates available for inspection ${inspectionId} (current: ${currentDate})`);
+    logger.info(`No earlier dates available for inspection ${id} (permit ${permitNumber}, current: ${currentScheduledDate})`);
     return {
-      inspectionId,
+      inspectionId: id,
       permitNumber,
       status: 'no_earlier_date',
-      currentDate,
+      currentScheduledDate,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
   const targetDate = earlierDates[0];
-  logger.info(`Found earlier date: ${targetDate.text} (current: ${currentDate})`);
+  logger.info(`Found earlier date: ${targetDate.text} (current: ${currentScheduledDate})`);
 
   if (config.dryRun) {
-    logger.info(`DRY RUN — Would reschedule inspection ${inspectionId} from ${currentDate} to ${targetDate.text}. No changes made.`);
+    logger.info(`DRY RUN — Would reschedule inspection ${id} (permit ${permitNumber}) from ${currentScheduledDate} to ${targetDate.text}. No changes made.`);
     return {
-      inspectionId,
+      inspectionId: id,
       permitNumber,
       status: 'dry_run',
-      previousDate: currentDate,
+      previousDate: currentScheduledDate,
       proposedDate: targetDate.text,
       availableDates: availableDates.map((d) => d.text),
     };
@@ -75,10 +75,10 @@ async function processInspection(page, inspection) {
   const result = await rescheduleInspection(page, targetDate);
 
   return {
-    inspectionId,
+    inspectionId: id,
     permitNumber,
     status: result.success ? 'rescheduled' : 'reschedule_uncertain',
-    previousDate: currentDate,
+    previousDate: currentScheduledDate,
     newDate: targetDate.text,
     screenshotFile: result.screenshotFile,
     availableDates: availableDates.map((d) => d.text),
@@ -144,9 +144,9 @@ async function mainLoop() {
             await jitter();
           } catch (err) {
             if (err instanceof PermitNotFoundError) {
-              logger.error(`Permit not found — skipping inspection ${inspection.inspectionId}: ${err.message}`);
+              logger.error(`Permit not found — skipping inspection ${inspection.id} (permit ${inspection.permitNumber}): ${err.message}`);
               await postAutomationResult({
-                inspectionId: inspection.inspectionId,
+                inspectionId: inspection.id,
                 permitNumber: inspection.permitNumber,
                 status: 'permit_not_found',
                 error: err.message,
@@ -158,11 +158,11 @@ async function mainLoop() {
             attempt++;
             const delay = backoffDelay(attempt);
             logger.error(
-              `Error processing inspection ${inspection.inspectionId} (attempt ${attempt}/${config.timing.maxRetries})`,
+              `Error processing inspection ${inspection.id} (permit ${inspection.permitNumber}) (attempt ${attempt}/${config.timing.maxRetries})`,
               err.message
             );
 
-            await takeScreenshot(page, `error-${inspection.inspectionId}-attempt${attempt}`);
+            await takeScreenshot(page, `error-${inspection.id}-attempt${attempt}`);
 
             if (err.message.includes('Login failed') || err.message.includes('session')) {
               logger.info('Attempting fresh login after session error');
@@ -181,9 +181,9 @@ async function mainLoop() {
         }
 
         if (!processed) {
-          logger.error(`Exhausted retries for inspection ${inspection.inspectionId}`);
+          logger.error(`Exhausted retries for inspection ${inspection.id} (permit ${inspection.permitNumber})`);
           await postAutomationResult({
-            inspectionId: inspection.inspectionId,
+            inspectionId: inspection.id,
             permitNumber: inspection.permitNumber,
             status: 'failed',
             error: 'Max retries exhausted',
