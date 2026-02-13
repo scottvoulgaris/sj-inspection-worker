@@ -36,8 +36,8 @@ app.get('/', (req, res) => {
   res.send('Worker running');
 });
 
-app.listen(PORT, () => {
-  logger.info(`Health server listening on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  logger.info(`Health server listening on 0.0.0.0:${PORT}`);
 });
 
 validateEnv();
