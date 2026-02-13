@@ -44,7 +44,13 @@ async function processInspection(page, inspection) {
   }
 
   const currentDateObj = new Date(currentScheduledDate);
-  const earlierDates = availableDates.filter((d) => d.date < currentDateObj);
+  currentDateObj.setHours(0, 0, 0, 0);
+  logger.info(`Current scheduled date parsed: ${currentDateObj.toISOString()}`);
+
+  const earlierDates = availableDates.filter((d) => {
+    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()}`);
+    return d.date.getTime() < currentDateObj.getTime();
+  });
 
   if (earlierDates.length === 0) {
     logger.info(`No earlier dates available for inspection ${id} (permit ${permitNumber}, current: ${currentScheduledDate})`);
@@ -58,7 +64,7 @@ async function processInspection(page, inspection) {
   }
 
   const targetDate = earlierDates[0];
-  logger.info(`Found earlier date: ${targetDate.text} (current: ${currentScheduledDate})`);
+  logger.info(`Found earlier date: ${targetDate.text} (${targetDate.date.toISOString()}) vs current: ${currentScheduledDate} (${currentDateObj.toISOString()})`);
 
   if (config.dryRun) {
     logger.info(`DRY RUN — Would reschedule inspection ${id} (permit ${permitNumber}) from ${currentScheduledDate} to ${targetDate.text}. No changes made.`);

@@ -182,22 +182,37 @@ async function getAvailableDates(page) {
 
   logger.info(`Date options: ${options.map((o) => o.text).join(', ')}`);
 
+  const currentYear = new Date().getFullYear();
+
   const dates = options
     .map((o) => {
-      const parsed = new Date(o.text);
-      if (!isNaN(parsed.getTime())) {
-        return { raw: o.value, text: o.text, date: parsed };
+      let parsed = new Date(o.text);
+      if (isNaN(parsed.getTime())) {
+        parsed = new Date(`${o.text}, ${currentYear}`);
       }
-      const valParsed = new Date(o.value);
-      if (!isNaN(valParsed.getTime())) {
-        return { raw: o.value, text: o.text, date: valParsed };
+      if (isNaN(parsed.getTime())) {
+        parsed = new Date(o.value);
       }
-      return null;
+      if (isNaN(parsed.getTime())) {
+        parsed = new Date(`${o.value}, ${currentYear}`);
+      }
+      if (isNaN(parsed.getTime())) {
+        logger.warn(`Could not parse date from option: text="${o.text}" value="${o.value}"`);
+        return null;
+      }
+      if (parsed.getFullYear() !== currentYear) {
+        parsed.setFullYear(currentYear);
+      }
+      parsed.setHours(0, 0, 0, 0);
+      return { raw: o.value, text: o.text, date: parsed };
     })
     .filter(Boolean)
-    .sort((a, b) => a.date - b.date);
+    .sort((a, b) => a.date.getTime() - b.date.getTime());
 
   logger.info(`Found ${dates.length} available dates`);
+  for (const d of dates) {
+    logger.info(`  Date option: "${d.text}" → ${d.date.toISOString()}`);
+  }
   return dates;
 }
 
