@@ -18,7 +18,8 @@ function screenshotPath(label) {
 }
 
 async function takeScreenshot(page, label) {
-  const filePath = screenshotPath(label);
+  fs.mkdirSync(config.screenshotDir, { recursive: true });
+  const filePath = path.resolve(screenshotPath(label));
   try {
     await page.screenshot({ path: filePath, fullPage: true });
     logger.info(`Screenshot saved: ${filePath}`);
