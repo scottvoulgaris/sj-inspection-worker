@@ -124,7 +124,7 @@ async function processInspection(page, inspection) {
     return {
       inspectionId: id,
       permitNumber,
-      status: result.success ? 'rescheduled_correction' : 'reschedule_uncertain',
+      status: result.success ? 'rescheduled' : 'reschedule_uncertain',
       reason: 'scheduled_too_soon',
       previousDate: currentScheduledDate,
       newDate: correctionDate.text,

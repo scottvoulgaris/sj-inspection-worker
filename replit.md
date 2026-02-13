@@ -30,7 +30,7 @@ A continuous Node.js background worker using Playwright to automate inspection r
 
 ### Date Filtering Logic
 - `parseFlexibleDate(dateStr)` — Robust date parser handles text dates ("Monday, March 2"), ISO dates, and MM/DD/YYYY. Auto-corrects years < 2020 to current year. Normalizes to midnight.
-- If `currentScheduledDate` is **before** `desiredDate` (scheduled too soon), worker immediately reschedules to the first available date on or after `desiredDate` — status `rescheduled_correction`
+- If `currentScheduledDate` is **before** `desiredDate` (scheduled too soon), worker immediately reschedules to the first available date on or after `desiredDate` — status `rescheduled` with `reason: 'scheduled_too_soon'`
 - Otherwise, candidate dates must be **earlier** than `currentScheduledDate` AND **on or after** `desiredDate` (preferred date)
 - If `desiredDate` is missing or unparseable, only the "earlier than current" filter applies
 - If inspection includes `targetDate` field (override), worker skips normal filtering and reschedules directly to that specific date if available in dropdown
