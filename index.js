@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { mainLoop } = require('./src/worker');
 const { closeBrowser } = require('./src/browser');
