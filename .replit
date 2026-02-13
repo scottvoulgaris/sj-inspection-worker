@@ -32,3 +32,11 @@ outputType = "console"
 [deployment]
 deploymentTarget = "vm"
 run = ["node", "index.js"]
+
+[userenv]
+
+[userenv.shared]
+CONTROL_APP_URL = "https://inspection-scheduler-accelerator.replit.app/"
+DRY_RUN = "true"
+PORTAL_USERNAME = "permits@aro.homes"
+PORTAL_PASSWORD = "Aroconstruction1"
