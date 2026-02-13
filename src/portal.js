@@ -73,66 +73,44 @@ async function login(page) {
 async function navigateToInspections(page, permitNumber) {
   logger.info(`Navigating to inspections for permit: ${permitNumber}`);
 
+  const manageBtn = page.locator('button:has-text("Manage Inspections (Bldg & Fire)"), a:has-text("Manage Inspections (Bldg & Fire)"), input[value*="Manage Inspections"]');
   try {
-    await page.click('text=My Services', { timeout: 10_000 });
-    await page.waitForLoadState('domcontentloaded');
+    await manageBtn.first().click({ timeout: 15_000 });
   } catch {
-    logger.warn('Could not find "My Services" link, trying alternative navigation');
-    await page.goto(`${config.portal.baseUrl}/permits/general/myservices.asp`, {
-      waitUntil: 'domcontentloaded',
-    });
+    await takeScreenshot(page, 'manage-inspections-btn-not-found');
+    throw new Error('Could not find "Manage Inspections (Bldg & Fire)" button');
   }
+  logger.info('Clicked Manage Inspections');
 
-  try {
-    await page.click('text=Manage Inspections', { timeout: 10_000 });
-    await page.waitForLoadState('domcontentloaded');
-  } catch {
-    logger.warn('Could not find "Manage Inspections" link, trying alternative');
-    await page.goto(`${config.portal.baseUrl}/permits/general/manageinspections.asp`, {
-      waitUntil: 'domcontentloaded',
-    });
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForTimeout(3_000);
+
+  const permitLocator = page.locator(`table td >> text="${permitNumber}"`).first();
+  const locatorCount = await permitLocator.count();
+  if (locatorCount === 0) {
+    await takeScreenshot(page, `permit-not-found-${permitNumber}`);
+    throw new PermitNotFoundError(`Permit ${permitNumber} not found in inspections table`);
   }
+  logger.info('Permit row found');
 
-  await page.waitForTimeout(2_000);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
+    permitLocator.click(),
+  ]);
+  logger.info('Clicked permit number');
 
-  const fileNumberLinks = await page.$$eval('table a, td a', (anchors) =>
-    anchors.map((a) => a.innerText.trim()).filter((t) => t.length > 0)
-  );
-  if (fileNumberLinks.length > 0) {
-    logger.info('Visible file numbers:');
-    for (const text of fileNumberLinks) {
-      logger.info(`- "${text}"`);
-    }
-  } else {
-    logger.info('No file number hyperlinks found on Manage Inspections page');
-  }
-
-  const permitInput = await page.$('input[name="permit"], input[name="permitNumber"], #permitNumber');
-  if (permitInput) {
-    await permitInput.fill(permitNumber);
-    await page.click('input[type="submit"], button[type="submit"], #searchButton');
-    await page.waitForLoadState('domcontentloaded');
-  } else {
-    const permitLink = await page.$(`text=${permitNumber}`);
-    if (permitLink) {
-      await permitLink.click();
-      await page.waitForLoadState('domcontentloaded');
-    } else {
-      throw new PermitNotFoundError(`Permit ${permitNumber} not found in portal`);
-    }
-  }
+  await page.waitForTimeout(3_000);
+  await takeScreenshot(page, `after-permit-click-${permitNumber}`);
 
   const bodyText = await page.textContent('body').catch(() => '');
-  const notFoundIndicators = ['not found', 'no results', 'no record', 'does not exist', 'invalid permit'];
-  const lowerBody = bodyText.toLowerCase();
-  for (const indicator of notFoundIndicators) {
-    if (lowerBody.includes(indicator)) {
-      await takeScreenshot(page, `permit-not-found-${permitNumber}`);
-      throw new PermitNotFoundError(`Permit ${permitNumber} not found in portal (page contains "${indicator}")`);
-    }
-  }
+  const currentUrl = page.url();
+  logger.info(`Current URL after click: ${currentUrl}`);
 
-  logger.info(`Navigated to permit ${permitNumber}`);
+  if (bodyText.includes('Scheduling or Changing Inspection Requests')) {
+    logger.info(`Navigated to inspection scheduling page for permit ${permitNumber}`);
+  } else {
+    logger.warn(`Did not reach scheduling page. Page heading: ${bodyText.substring(0, 200)}`);
+  }
 }
 
 async function getAvailableDates(page) {
