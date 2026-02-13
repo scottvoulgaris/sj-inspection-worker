@@ -30,6 +30,7 @@ const config = {
   },
   screenshotDir: './screenshots',
   dryRun: process.env.DRY_RUN !== 'false',
+  maxInspectionsPerCycle: parseInt(process.env.MAX_INSPECTIONS_PER_CYCLE, 10) || 3,
 };
 
 module.exports = config;

@@ -120,10 +120,13 @@ async function mainLoop() {
         continue;
       }
 
+      const toProcess = inspections.slice(0, config.maxInspectionsPerCycle);
+      logger.info(`Processing ${toProcess.length} of ${inspections.length} inspections this cycle`);
+
       page = await newPage();
       await login(page);
 
-      for (const inspection of inspections) {
+      for (const inspection of toProcess) {
         let attempt = 0;
         let processed = false;
 
