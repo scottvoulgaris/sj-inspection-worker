@@ -93,6 +93,20 @@ async function navigateToInspections(page, permitNumber) {
     });
   }
 
+  await page.waitForTimeout(2_000);
+
+  const fileNumberLinks = await page.$$eval('table a, td a', (anchors) =>
+    anchors.map((a) => a.innerText.trim()).filter((t) => t.length > 0)
+  );
+  if (fileNumberLinks.length > 0) {
+    logger.info('Visible file numbers:');
+    for (const text of fileNumberLinks) {
+      logger.info(`- "${text}"`);
+    }
+  } else {
+    logger.info('No file number hyperlinks found on Manage Inspections page');
+  }
+
   const permitInput = await page.$('input[name="permit"], input[name="permitNumber"], #permitNumber');
   if (permitInput) {
     await permitInput.fill(permitNumber);
