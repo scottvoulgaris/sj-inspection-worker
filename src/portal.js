@@ -1,0 +1,167 @@
+const path = require('path');
+const fs = require('fs');
+const config = require('./config');
+const logger = require('./logger');
+
+fs.mkdirSync(config.screenshotDir, { recursive: true });
+
+function screenshotPath(label) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  return path.join(config.screenshotDir, `${label}_${ts}.png`);
+}
+
+async function takeScreenshot(page, label) {
+  const filePath = screenshotPath(label);
+  try {
+    await page.screenshot({ path: filePath, fullPage: true });
+    logger.info(`Screenshot saved: ${filePath}`);
+    return filePath;
+  } catch (err) {
+    logger.warn(`Screenshot failed (${label})`, err.message);
+    return null;
+  }
+}
+
+async function login(page) {
+  logger.info('Navigating to login page');
+  await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded' });
+
+  await page.fill('input[name="email"], input[type="email"], #email, input[name="username"]', config.portal.username);
+  await page.fill('input[name="password"], input[type="password"], #password', config.portal.password);
+
+  await page.click('input[type="submit"], button[type="submit"], #loginButton, .login-btn');
+  await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: config.timing.navigationTimeoutMs });
+
+  const url = page.url();
+  const isLoggedIn = !url.includes('login');
+  if (!isLoggedIn) {
+    await takeScreenshot(page, 'login-failed');
+    throw new Error('Login failed – still on login page after submit');
+  }
+
+  logger.info('Login successful');
+  return true;
+}
+
+async function navigateToInspections(page, permitNumber) {
+  logger.info(`Navigating to inspections for permit: ${permitNumber}`);
+
+  try {
+    await page.click('text=My Services', { timeout: 10_000 });
+    await page.waitForLoadState('domcontentloaded');
+  } catch {
+    logger.warn('Could not find "My Services" link, trying alternative navigation');
+    await page.goto(`${config.portal.baseUrl}/permits/general/myservices.asp`, {
+      waitUntil: 'domcontentloaded',
+    });
+  }
+
+  try {
+    await page.click('text=Manage Inspections', { timeout: 10_000 });
+    await page.waitForLoadState('domcontentloaded');
+  } catch {
+    logger.warn('Could not find "Manage Inspections" link, trying alternative');
+    await page.goto(`${config.portal.baseUrl}/permits/general/manageinspections.asp`, {
+      waitUntil: 'domcontentloaded',
+    });
+  }
+
+  const permitInput = await page.$('input[name="permit"], input[name="permitNumber"], #permitNumber');
+  if (permitInput) {
+    await permitInput.fill(permitNumber);
+    await page.click('input[type="submit"], button[type="submit"], #searchButton');
+    await page.waitForLoadState('domcontentloaded');
+  } else {
+    const permitLink = await page.$(`text=${permitNumber}`);
+    if (permitLink) {
+      await permitLink.click();
+      await page.waitForLoadState('domcontentloaded');
+    } else {
+      throw new Error(`Could not locate permit ${permitNumber} on inspections page`);
+    }
+  }
+
+  logger.info(`Navigated to permit ${permitNumber}`);
+}
+
+async function getAvailableDates(page) {
+  logger.info('Extracting available inspection dates');
+
+  const dateSelect = await page.$(
+    'select[name="inspectionDate"], select[name="date"], #inspectionDate, select.inspection-date'
+  );
+
+  if (!dateSelect) {
+    logger.warn('No date dropdown found on page');
+    await takeScreenshot(page, 'no-date-dropdown');
+    return [];
+  }
+
+  const options = await dateSelect.$$eval('option', (opts) =>
+    opts
+      .map((o) => ({ value: o.value, text: o.textContent.trim() }))
+      .filter((o) => o.value && o.value !== '' && o.value !== 'Select')
+  );
+
+  const dates = options
+    .map((o) => {
+      const parsed = new Date(o.value || o.text);
+      return isNaN(parsed.getTime()) ? null : { raw: o.value, text: o.text, date: parsed };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.date - b.date);
+
+  logger.info(`Found ${dates.length} available dates`);
+  return dates;
+}
+
+async function rescheduleInspection(page, targetDate) {
+  logger.info(`Attempting reschedule to ${targetDate.text} (${targetDate.raw})`);
+
+  const dateSelect = await page.$(
+    'select[name="inspectionDate"], select[name="date"], #inspectionDate, select.inspection-date'
+  );
+  if (!dateSelect) {
+    throw new Error('Date dropdown not found for reschedule');
+  }
+
+  await dateSelect.selectOption(targetDate.raw);
+  await takeScreenshot(page, 'pre-reschedule');
+
+  const submitBtn = await page.$(
+    'input[value*="Reschedule"], button:has-text("Reschedule"), input[value*="Schedule"], button:has-text("Submit"), input[type="submit"]'
+  );
+
+  if (!submitBtn) {
+    await takeScreenshot(page, 'no-reschedule-button');
+    throw new Error('Reschedule/submit button not found');
+  }
+
+  await submitBtn.click();
+  await page.waitForLoadState('domcontentloaded');
+
+  const screenshotFile = await takeScreenshot(page, 'post-reschedule');
+
+  const pageText = await page.textContent('body');
+  const success =
+    pageText.toLowerCase().includes('successfully') ||
+    pageText.toLowerCase().includes('rescheduled') ||
+    pageText.toLowerCase().includes('confirmed');
+
+  logger.info(`Reschedule result: ${success ? 'SUCCESS' : 'UNCERTAIN'}`);
+  return { success, screenshotFile, targetDate: targetDate.text };
+}
+
+function isSessionExpired(page) {
+  const url = page.url();
+  return url.includes('login') || url.includes('session') || url.includes('timeout');
+}
+
+module.exports = {
+  login,
+  navigateToInspections,
+  getAvailableDates,
+  rescheduleInspection,
+  isSessionExpired,
+  takeScreenshot,
+};
