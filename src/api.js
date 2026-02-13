@@ -42,8 +42,19 @@ async function sendHeartbeat(payload) {
   }
 }
 
+async function fetchAutomationSettings() {
+  try {
+    const res = await client.get('/automation/settings');
+    return res.data;
+  } catch (err) {
+    logger.warn('Failed to fetch automation settings, using defaults', err.message);
+    return null;
+  }
+}
+
 module.exports = {
   fetchPrioritizedInspections,
   postAutomationResult,
   sendHeartbeat,
+  fetchAutomationSettings,
 };

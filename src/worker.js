@@ -2,7 +2,7 @@ const config = require('./config');
 const logger = require('./logger');
 const { newPage, closeBrowser } = require('./browser');
 const { login, navigateToInspections, getAvailableDates, rescheduleInspection, isSessionExpired, takeScreenshot, PermitNotFoundError } = require('./portal');
-const { fetchPrioritizedInspections, postAutomationResult, sendHeartbeat } = require('./api');
+const { fetchPrioritizedInspections, postAutomationResult, sendHeartbeat, fetchAutomationSettings } = require('./api');
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -218,8 +218,17 @@ async function mainLoop() {
       }
     }
 
-    logger.info(`Cycle ${cycleCount} complete. Pausing ${config.timing.cyclePauseMs}ms`);
-    await sleep(config.timing.cyclePauseMs);
+    const settings = await fetchAutomationSettings();
+    if (settings && settings.paused === true) {
+      logger.info('Automation paused. Sleeping 60s.');
+      await sleep(60_000);
+      continue;
+    }
+    const pauseMs = settings && settings.pollingIntervalSeconds
+      ? settings.pollingIntervalSeconds * 1000
+      : 60_000;
+    logger.info(`Cycle ${cycleCount} complete. Sleeping for ${pauseMs}ms`);
+    await sleep(pauseMs);
   }
 }
 
