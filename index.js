@@ -33,7 +33,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('Worker running');
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
