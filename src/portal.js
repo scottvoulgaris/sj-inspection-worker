@@ -143,7 +143,39 @@ async function navigateToInspections(page, permitNumber) {
     logger.warn(`Did not reach scheduling page for ${permitNumber}`);
   }
 
-  return { inspPage, permitNumber };
+  await takeScreenshot(inspPage, `scheduling-page-${permitNumber}`);
+
+  const confirmationLinks = inspPage.locator('table a').filter({ hasText: /^\d+[A-Z]*\d*$/ });
+  const confCount = await confirmationLinks.count();
+  logger.info(`Found ${confCount} confirmation number link(s)`);
+
+  if (confCount === 0) {
+    await takeScreenshot(inspPage, `no-confirmation-links-${permitNumber}`);
+    throw new Error(`No confirmation number links found for permit ${permitNumber}`);
+  }
+
+  const confText = (await confirmationLinks.first().innerText()).trim();
+  logger.info(`Clicking confirmation number: ${confText}`);
+
+  await Promise.all([
+    inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
+    confirmationLinks.first().click(),
+  ]);
+
+  await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
+  await inspPage.waitForTimeout(2_000);
+
+  const modifyText = await inspPage.textContent('body').catch(() => '');
+  if (modifyText.includes('Modify Inspection Request')) {
+    logger.info(`Navigated to Modify Inspection Request page for permit ${permitNumber} (confirmation ${confText})`);
+  } else {
+    await takeScreenshot(inspPage, `unexpected-modify-page-${permitNumber}`);
+    logger.warn(`Did not reach Modify Inspection Request page for ${permitNumber}`);
+  }
+
+  await takeScreenshot(inspPage, `modify-page-${permitNumber}`);
+
+  return { inspPage, permitNumber, confirmationNumber: confText };
 }
 
 async function getAvailableDates(page) {
@@ -221,45 +253,41 @@ async function rescheduleInspection(page, targetDate) {
 
   const screenshotTarget = page.page ? page.page() : page;
 
-  const selects = await page.$$('select');
-  let dateSelect = null;
-  for (const sel of selects) {
-    const options = await sel.$$eval('option', (opts) =>
-      opts.map((o) => o.textContent.trim())
-    );
-    const datePattern = /monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december|\d{1,2}\/\d{1,2}\/\d{2,4}/i;
-    const hasDateOption = options.some((t) => datePattern.test(t));
-    if (hasDateOption) {
-      dateSelect = sel;
-      break;
-    }
-  }
-  if (!dateSelect) {
-    throw new Error('Date dropdown not found for reschedule');
+  const dateSelect = page.locator('select').filter({ hasText: /monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december/i }).first();
+  const selectCount = await dateSelect.count();
+  if (selectCount === 0) {
+    throw new Error('Inspection Date dropdown not found on Modify page');
   }
 
   await dateSelect.selectOption(targetDate.raw);
-  await takeScreenshot(screenshotTarget, 'pre-reschedule');
+  logger.info(`Selected date: ${targetDate.text}`);
+  await page.waitForTimeout(1_000);
+  await takeScreenshot(screenshotTarget, 'pre-resubmit');
 
-  const submitBtn = await page.$(
-    'input[value*="Reschedule"], button:has-text("Reschedule"), input[value*="Schedule"], button:has-text("Submit"), input[type="submit"]'
-  );
-
-  if (!submitBtn) {
-    await takeScreenshot(screenshotTarget, 'no-reschedule-button');
-    throw new Error('Reschedule/submit button not found');
+  const resubmitBtn = page.locator('input[value*="Resubmit"], button:has-text("Resubmit")').first();
+  const btnCount = await resubmitBtn.count();
+  if (btnCount === 0) {
+    await takeScreenshot(screenshotTarget, 'no-resubmit-button');
+    throw new Error('"Resubmit Request" button not found on Modify page');
   }
 
-  await submitBtn.click();
-  await page.waitForLoadState('domcontentloaded');
+  logger.info('Clicking "Resubmit Request" button');
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
+    resubmitBtn.click(),
+  ]);
 
-  const screenshotFile = await takeScreenshot(screenshotTarget, 'post-reschedule');
+  await page.waitForLoadState('domcontentloaded').catch(() => null);
+  await page.waitForTimeout(2_000);
 
-  const pageText = await page.textContent('body');
+  const screenshotFile = await takeScreenshot(screenshotTarget, 'post-resubmit');
+
+  const pageText = await page.textContent('body').catch(() => '');
   const success =
     pageText.toLowerCase().includes('successfully') ||
     pageText.toLowerCase().includes('rescheduled') ||
-    pageText.toLowerCase().includes('confirmed');
+    pageText.toLowerCase().includes('confirmed') ||
+    pageText.toLowerCase().includes('scheduled');
 
   logger.info(`Reschedule result: ${success ? 'SUCCESS' : 'UNCERTAIN'}`);
   return { success, screenshotFile, targetDate: targetDate.text };

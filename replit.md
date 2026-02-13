@@ -22,18 +22,20 @@ A continuous Node.js background worker using Playwright to automate inspection r
 
 ### Key Functions
 - `login(page)` — Authenticates with the San José portal via portal.sanjoseca.gov
-- `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), finds matching file number hyperlink (converts dashes to spaces for matching), clicks it to reach the scheduling page. Returns `{ inspPage, permitNumber }` where inspPage is the popup Page.
-- `getAvailableDates(page)` — Smart-detects date dropdown by scanning all `<select>` elements for date-like options (day/month names or numeric dates). Extracts and sorts available dates.
-- `rescheduleInspection(page, targetDate)` — Attempts to reschedule to an earlier date
-- `mainLoop()` — Infinite loop: fetch inspections → process each → heartbeat → pause → repeat
+- `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), finds matching file number hyperlink, clicks it, then clicks the confirmation number link to reach the Modify Inspection Request page. Returns `{ inspPage, permitNumber, confirmationNumber }`.
+- `getAvailableDates(page)` — Smart-detects date dropdown by scanning all `<select>` elements for date-like options (day/month names or numeric dates). Extracts and sorts available dates. Works on the Modify page's "Inspection Date" dropdown.
+- `rescheduleInspection(page, targetDate)` — Selects the new date in the Inspection Date dropdown and clicks "Resubmit Request" on the Modify page.
+- `fetchAutomationSettings()` — Fetches polling interval and paused state from control API.
+- `mainLoop()` — Infinite loop: fetch inspections → process each → heartbeat → fetch settings → pause → repeat
 
 ### Portal Navigation Flow
 1. Login at portal.sanjoseca.gov
 2. Click "Manage Inspections (Bldg & Fire)" button → opens popup window
 3. In popup: find file number hyperlink matching permit (e.g. "2026 103016 RS" matches "2026-103016-RS")
 4. Click file number → lands on "Scheduling or Changing Inspection Requests" page
-5. Extract available dates from dropdown, compare with current scheduled date
-6. If earlier date available and not in dry-run mode, reschedule
+5. Click confirmation number link → lands on "Modify Inspection Request For Combination" page
+6. Extract available dates from "Inspection Date" dropdown, compare with current scheduled date
+7. If earlier date available and not in dry-run mode, select new date and click "Resubmit Request"
 
 ### Features
 - Popup window handling for Manage Inspections page
