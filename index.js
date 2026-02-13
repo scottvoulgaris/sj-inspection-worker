@@ -1,3 +1,4 @@
+
 const express = require('express');
 const { mainLoop } = require('./src/worker');
 const { closeBrowser } = require('./src/browser');
@@ -29,28 +30,20 @@ process.on('uncaughtException', (err) => {
   logger.error('Uncaught exception', err.message);
 });
 
-validateEnv();
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let workerStatus = 'starting';
-
 app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', worker: workerStatus, uptime: process.uptime() });
-});
-
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', worker: workerStatus, uptime: process.uptime() });
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
   logger.info(`Health server listening on 0.0.0.0:${PORT}`);
-  workerStatus = 'running';
-  logger.info('Automation worker initializing...');
-  mainLoop().catch((err) => {
-    workerStatus = 'error';
-    logger.error('Fatal error in main loop', err.message);
-    closeBrowser().finally(() => process.exit(1));
-  });
+});
+
+validateEnv();
+logger.info('Automation worker initializing...');
+mainLoop().catch((err) => {
+  logger.error('Fatal error in main loop', err.message);
+  closeBrowser().finally(() => process.exit(1));
 });

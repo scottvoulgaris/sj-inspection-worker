@@ -30,7 +30,7 @@ args = "node index.js"
 outputType = "console"
 
 [deployment]
-deploymentTarget = "vm"
+deploymentTarget = "cloudrun"
 run = ["node", "index.js"]
 
 [userenv]
