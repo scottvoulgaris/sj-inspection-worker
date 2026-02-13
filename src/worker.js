@@ -1,7 +1,7 @@
 const config = require('./config');
 const logger = require('./logger');
 const { newPage, closeBrowser } = require('./browser');
-const { login, navigateToInspections, getAvailableDates, rescheduleInspection, isSessionExpired, takeScreenshot } = require('./portal');
+const { login, navigateToInspections, getAvailableDates, rescheduleInspection, isSessionExpired, takeScreenshot, PermitNotFoundError } = require('./portal');
 const { fetchPrioritizedInspections, postAutomationResult, sendHeartbeat } = require('./api');
 
 function sleep(ms) {
@@ -60,6 +60,18 @@ async function processInspection(page, inspection) {
   const targetDate = earlierDates[0];
   logger.info(`Found earlier date: ${targetDate.text} (current: ${currentDate})`);
 
+  if (config.dryRun) {
+    logger.info(`DRY RUN — Would reschedule inspection ${inspectionId} from ${currentDate} to ${targetDate.text}. No changes made.`);
+    return {
+      inspectionId,
+      permitNumber,
+      status: 'dry_run',
+      previousDate: currentDate,
+      proposedDate: targetDate.text,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
+
   const result = await rescheduleInspection(page, targetDate);
 
   return {
@@ -75,6 +87,12 @@ async function processInspection(page, inspection) {
 
 async function mainLoop() {
   logger.info('=== Automation worker starting ===');
+  if (config.dryRun) {
+    logger.info('*****************************************************');
+    logger.info('*** DRY RUN MODE — No changes will be made        ***');
+    logger.info('*** Set DRY_RUN=false to enable live rescheduling ***');
+    logger.info('*****************************************************');
+  }
   logger.info(`Control API: ${config.controlApp.url}`);
   logger.info(`Portal: ${config.portal.loginUrl}`);
 
@@ -122,6 +140,18 @@ async function mainLoop() {
 
             await jitter();
           } catch (err) {
+            if (err instanceof PermitNotFoundError) {
+              logger.error(`Permit not found — skipping inspection ${inspection.inspectionId}: ${err.message}`);
+              await postAutomationResult({
+                inspectionId: inspection.inspectionId,
+                permitNumber: inspection.permitNumber,
+                status: 'permit_not_found',
+                error: err.message,
+              });
+              processed = true;
+              break;
+            }
+
             attempt++;
             const delay = backoffDelay(attempt);
             logger.error(

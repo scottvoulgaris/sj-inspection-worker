@@ -29,6 +29,7 @@ const config = {
     backoffMaxMs: 120_000,
   },
   screenshotDir: './screenshots',
+  dryRun: process.env.DRY_RUN !== 'false',
 };
 
 module.exports = config;

@@ -5,6 +5,13 @@ const logger = require('./logger');
 
 fs.mkdirSync(config.screenshotDir, { recursive: true });
 
+class PermitNotFoundError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PermitNotFoundError';
+  }
+}
+
 function screenshotPath(label) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   return path.join(config.screenshotDir, `${label}_${ts}.png`);
@@ -77,7 +84,17 @@ async function navigateToInspections(page, permitNumber) {
       await permitLink.click();
       await page.waitForLoadState('domcontentloaded');
     } else {
-      throw new Error(`Could not locate permit ${permitNumber} on inspections page`);
+      throw new PermitNotFoundError(`Permit ${permitNumber} not found in portal`);
+    }
+  }
+
+  const bodyText = await page.textContent('body').catch(() => '');
+  const notFoundIndicators = ['not found', 'no results', 'no record', 'does not exist', 'invalid permit'];
+  const lowerBody = bodyText.toLowerCase();
+  for (const indicator of notFoundIndicators) {
+    if (lowerBody.includes(indicator)) {
+      await takeScreenshot(page, `permit-not-found-${permitNumber}`);
+      throw new PermitNotFoundError(`Permit ${permitNumber} not found in portal (page contains "${indicator}")`);
     }
   }
 
@@ -164,4 +181,5 @@ module.exports = {
   rescheduleInspection,
   isSessionExpired,
   takeScreenshot,
+  PermitNotFoundError,
 };
