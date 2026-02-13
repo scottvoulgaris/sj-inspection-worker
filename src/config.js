@@ -29,7 +29,7 @@ const config = {
     backoffMaxMs: 120_000,
   },
   screenshotDir: './screenshots',
-  dryRun: process.env.DRY_RUN !== 'false',
+  dryRun: (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false',
   maxInspectionsPerCycle: parseInt(process.env.MAX_INSPECTIONS_PER_CYCLE, 10) || 3,
 };
 

@@ -93,6 +93,7 @@ async function processInspection(page, inspection) {
 
 async function mainLoop() {
   logger.info('=== Automation worker starting ===');
+  logger.info(`DRY_RUN env raw value: "${process.env.DRY_RUN}" → dryRun=${config.dryRun}`);
   if (config.dryRun) {
     logger.info('*****************************************************');
     logger.info('*** DRY RUN MODE — No changes will be made        ***');
