@@ -89,6 +89,51 @@ async function processInspection(page, inspection) {
     }
   }
 
+  if (preferredDateObj && currentDateObj.getTime() < preferredDateObj.getTime()) {
+    logger.warn(`Inspection ${id} is scheduled TOO SOON: current ${currentDateObj.toISOString()} is before preferred ${preferredDateObj.toISOString()}`);
+    const correctionDates = availableDates.filter((d) => d.date.getTime() >= preferredDateObj.getTime());
+    if (correctionDates.length === 0) {
+      logger.warn(`No available dates on or after preferred date ${desiredDate} to correct inspection ${id}`);
+      return {
+        inspectionId: id,
+        permitNumber,
+        status: 'scheduled_too_soon_no_correction',
+        currentScheduledDate,
+        desiredDate,
+        availableDates: availableDates.map((d) => d.text),
+      };
+    }
+    const correctionDate = correctionDates[0];
+    logger.info(`Correction target: ${correctionDate.text} (${correctionDate.date.toISOString()}) — first available on/after preferred ${desiredDate}`);
+
+    if (config.dryRun) {
+      logger.info(`DRY RUN — Would correct inspection ${id} from ${currentScheduledDate} to ${correctionDate.text} (scheduled before preferred date). No changes made.`);
+      return {
+        inspectionId: id,
+        permitNumber,
+        status: 'dry_run',
+        reason: 'scheduled_too_soon',
+        previousDate: currentScheduledDate,
+        proposedDate: correctionDate.text,
+        desiredDate,
+        availableDates: availableDates.map((d) => d.text),
+      };
+    }
+
+    const result = await rescheduleInspection(inspPage, correctionDate);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: result.success ? 'rescheduled_correction' : 'reschedule_uncertain',
+      reason: 'scheduled_too_soon',
+      previousDate: currentScheduledDate,
+      newDate: correctionDate.text,
+      desiredDate,
+      screenshotFile: result.screenshotFile,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
+
   let eligibleDates = availableDates.filter((d) => {
     const isEarlier = d.date.getTime() < currentDateObj.getTime();
     const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
