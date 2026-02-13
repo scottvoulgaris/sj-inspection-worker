@@ -21,9 +21,28 @@ function backoffDelay(attempt) {
   return Math.floor(withJitter);
 }
 
+function parseFlexibleDate(dateStr) {
+  if (!dateStr) return null;
+  const currentYear = new Date().getFullYear();
+  let parsed = new Date(dateStr);
+  if (isNaN(parsed.getTime())) {
+    parsed = new Date(`${dateStr}, ${currentYear}`);
+  }
+  if (isNaN(parsed.getTime())) {
+    parsed = new Date(`${dateStr} ${currentYear}`);
+  }
+  if (isNaN(parsed.getTime())) return null;
+  if (parsed.getFullYear() < 2020) {
+    parsed.setFullYear(currentYear);
+  }
+  parsed.setHours(0, 0, 0, 0);
+  return parsed;
+}
+
 async function processInspection(page, inspection) {
-  const { id, permitNumber, projectName, inspectionType, currentScheduledDate, desiredDate } = inspection;
+  const { id, permitNumber, projectName, inspectionType, currentScheduledDate, desiredDate, targetDate: overrideDate } = inspection;
   logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
+  logger.info(`  Current scheduled: ${currentScheduledDate}, Preferred/desired: ${desiredDate || 'none'}, Override target: ${overrideDate || 'none'}`);
 
   if (isSessionExpired(page)) {
     logger.info('Session expired, re-authenticating');
@@ -43,49 +62,133 @@ async function processInspection(page, inspection) {
     };
   }
 
-  const currentDateObj = new Date(currentScheduledDate);
-  currentDateObj.setHours(0, 0, 0, 0);
+  if (overrideDate) {
+    return await processOverrideReschedule(inspPage, inspection, availableDates);
+  }
+
+  const currentDateObj = parseFlexibleDate(currentScheduledDate);
+  if (!currentDateObj) {
+    logger.error(`Could not parse currentScheduledDate: "${currentScheduledDate}" for inspection ${id}`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'error',
+      error: `Could not parse current scheduled date: ${currentScheduledDate}`,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
   logger.info(`Current scheduled date parsed: ${currentDateObj.toISOString()}`);
 
-  const earlierDates = availableDates.filter((d) => {
-    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()}`);
-    return d.date.getTime() < currentDateObj.getTime();
+  let preferredDateObj = null;
+  if (desiredDate) {
+    preferredDateObj = parseFlexibleDate(desiredDate);
+    if (preferredDateObj) {
+      logger.info(`Preferred/desired date parsed: ${preferredDateObj.toISOString()}`);
+    } else {
+      logger.warn(`Could not parse desiredDate: "${desiredDate}" — will ignore preferred date filter`);
+    }
+  }
+
+  let eligibleDates = availableDates.filter((d) => {
+    const isEarlier = d.date.getTime() < currentDateObj.getTime();
+    const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
+    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()} preferred=${preferredDateObj ? preferredDateObj.toISOString() : 'none'} → earlier=${isEarlier}, afterPreferred=${isOnOrAfterPreferred}`);
+    return isEarlier && isOnOrAfterPreferred;
   });
 
-  if (earlierDates.length === 0) {
-    logger.info(`No earlier dates available for inspection ${id} (permit ${permitNumber}, current: ${currentScheduledDate})`);
+  if (eligibleDates.length === 0) {
+    logger.info(`No eligible earlier dates for inspection ${id} (permit ${permitNumber}, current: ${currentScheduledDate}, preferred: ${desiredDate || 'none'})`);
     return {
       inspectionId: id,
       permitNumber,
       status: 'no_earlier_date',
       currentScheduledDate,
+      desiredDate: desiredDate || null,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
-  const targetDate = earlierDates[0];
-  logger.info(`Found earlier date: ${targetDate.text} (${targetDate.date.toISOString()}) vs current: ${currentScheduledDate} (${currentDateObj.toISOString()})`);
+  const bestDate = eligibleDates[0];
+  logger.info(`Found eligible earlier date: ${bestDate.text} (${bestDate.date.toISOString()}) vs current: ${currentScheduledDate} (${currentDateObj.toISOString()})${preferredDateObj ? ` [preferred: ${desiredDate}]` : ''}`);
 
   if (config.dryRun) {
-    logger.info(`DRY RUN — Would reschedule inspection ${id} (permit ${permitNumber}) from ${currentScheduledDate} to ${targetDate.text}. No changes made.`);
+    logger.info(`DRY RUN — Would reschedule inspection ${id} (permit ${permitNumber}) from ${currentScheduledDate} to ${bestDate.text}. No changes made.`);
     return {
       inspectionId: id,
       permitNumber,
       status: 'dry_run',
       previousDate: currentScheduledDate,
-      proposedDate: targetDate.text,
+      proposedDate: bestDate.text,
+      desiredDate: desiredDate || null,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
-  const result = await rescheduleInspection(inspPage, targetDate);
+  const result = await rescheduleInspection(inspPage, bestDate);
 
   return {
     inspectionId: id,
     permitNumber,
     status: result.success ? 'rescheduled' : 'reschedule_uncertain',
     previousDate: currentScheduledDate,
-    newDate: targetDate.text,
+    newDate: bestDate.text,
+    desiredDate: desiredDate || null,
+    screenshotFile: result.screenshotFile,
+    availableDates: availableDates.map((d) => d.text),
+  };
+}
+
+async function processOverrideReschedule(inspPage, inspection, availableDates) {
+  const { id, permitNumber, targetDate: overrideDateStr, currentScheduledDate } = inspection;
+  const overrideDateObj = parseFlexibleDate(overrideDateStr);
+  if (!overrideDateObj) {
+    logger.error(`Could not parse override targetDate: "${overrideDateStr}" for inspection ${id}`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'error',
+      error: `Could not parse override target date: ${overrideDateStr}`,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
+
+  logger.info(`Override reschedule requested to: ${overrideDateObj.toISOString()}`);
+
+  const match = availableDates.find((d) => d.date.getTime() === overrideDateObj.getTime());
+  if (!match) {
+    logger.warn(`Override target date ${overrideDateStr} is not available in dropdown`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'target_date_unavailable',
+      requestedDate: overrideDateStr,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
+
+  logger.info(`Override target date found in dropdown: ${match.text}`);
+
+  if (config.dryRun) {
+    logger.info(`DRY RUN — Would override-reschedule inspection ${id} to ${match.text}. No changes made.`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'dry_run',
+      previousDate: currentScheduledDate,
+      proposedDate: match.text,
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
+
+  const result = await rescheduleInspection(inspPage, match);
+
+  return {
+    inspectionId: id,
+    permitNumber,
+    status: result.success ? 'rescheduled' : 'reschedule_uncertain',
+    previousDate: currentScheduledDate,
+    newDate: match.text,
+    override: true,
     screenshotFile: result.screenshotFile,
     availableDates: availableDates.map((d) => d.text),
   };

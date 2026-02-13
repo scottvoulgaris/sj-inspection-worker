@@ -28,16 +28,31 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `fetchAutomationSettings()` — Fetches polling interval and paused state from control API.
 - `mainLoop()` — Infinite loop: fetch inspections → process each → heartbeat → fetch settings → pause → repeat
 
+### Date Filtering Logic
+- `parseFlexibleDate(dateStr)` — Robust date parser handles text dates ("Monday, March 2"), ISO dates, and MM/DD/YYYY. Auto-corrects years < 2020 to current year. Normalizes to midnight.
+- Candidate dates must be **earlier** than `currentScheduledDate` AND **on or after** `desiredDate` (preferred date)
+- If `desiredDate` is missing or unparseable, only the "earlier than current" filter applies
+- If inspection includes `targetDate` field (override), worker skips normal filtering and reschedules directly to that specific date if available in dropdown
+
+### Override Reschedule (Remedy)
+- Control API can send a `targetDate` field on an inspection to force reschedule to a specific date
+- Used to undo bad reschedules or move to a specific desired date
+- Worker checks if `targetDate` is available in the portal dropdown, reports `target_date_unavailable` if not
+
 ### Portal Navigation Flow
 1. Login at portal.sanjoseca.gov
 2. Click "Manage Inspections (Bldg & Fire)" button → opens popup window
 3. In popup: find file number hyperlink matching permit (e.g. "2026 103016 RS" matches "2026-103016-RS")
 4. Click file number → lands on "Scheduling or Changing Inspection Requests" page
 5. Click confirmation number link → lands on "Modify Inspection Request For Combination" page
-6. Extract available dates from "Inspection Date" dropdown, compare with current scheduled date
-7. If earlier date available and not in dry-run mode, select new date and click "Resubmit Request"
+6. Extract available dates from "Inspection Date" dropdown
+7. Filter dates: must be earlier than current AND on/after preferred date
+8. If eligible date found (or override target specified) and not in dry-run mode, select new date and click "Resubmit Request"
 
 ### Features
+- Preferred date enforcement — never schedules before the desired/preferred date
+- Override reschedule via `targetDate` field for remediation
+- Robust date parsing handles text dates, ISO dates, and year edge cases
 - Popup window handling for Manage Inspections page
 - Exponential backoff with jitter on failures
 - Session expiration detection and automatic re-login
