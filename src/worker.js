@@ -392,7 +392,7 @@ async function mainLoop() {
     }
     const pauseMs = settings && settings.pollingIntervalSeconds
       ? settings.pollingIntervalSeconds * 1000
-      : 60_000;
+      : 300_000;
     logger.info(`Cycle ${cycleCount} complete. Sleeping for ${pauseMs}ms`);
     await sleep(pauseMs);
   }

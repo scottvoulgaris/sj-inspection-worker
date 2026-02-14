@@ -1,0 +1,47 @@
+We do NOT want to change architecture, APIs, or add new systems. The SJ Inspector web app already has a working heartbeat endpoint and UI. The worker must continue using that EXACT heartbeat flow.
+
+The only issue to solve is that Replit Deployments require an HTTP listener, while this worker is a background automation loop. We need to adapt the runtime so it can stay alive 24/7 without changing business logic.
+
+Make ONLY the following lifecycle changes:
+	1.	Add a minimal Express server strictly for Replit health checks.
+This server must NOT introduce new routes or logic.
+Requirements:
+	•	Listen on process.env.PORT || 3000
+	•	GET / returns plain text "worker alive"
+	•	No other behavior.
+	2.	Start this HTTP listener immediately when the app launches so Replit detects an open port.
+	3.	After the listener starts, launch the EXISTING automation worker exactly as-is.
+Do NOT refactor scheduling, inspection logic, portal automation, or database code.
+	4.	Keep using the CURRENT heartbeat implementation.
+Do NOT add a second heartbeat system.
+Do NOT change endpoints.
+The worker must continue calling the existing /api/heartbeat used by the SJ Inspector UI.
+	5.	Ensure the worker never exits:
+	•	Wrap the main loop in a safe async runner.
+	•	Catch and log all errors.
+	•	Always sleep using the configured polling interval before the next cycle.
+	•	Default polling interval to 300 seconds if settings cannot be read.
+	•	The Node process must stay alive indefinitely.
+	6.	Remove or ignore any deployment logic attempting:
+	•	Reserved VM configuration
+	•	Autoscale-specific shutdown handling
+	•	Any .replit or platform-specific deployment overrides
+	7.	The application must run correctly using:
+node index.js
+	8.	Do NOT modify:
+	•	API routes
+	•	Frontend
+	•	Heartbeat schema
+	•	Inspection logic
+	•	Environment variables
+	•	Authentication/session behavior
+
+Goal:
+A single long-running Node process that:
+✔ Opens a tiny HTTP port so Replit Deployments stay alive
+✔ Runs the automation loop forever
+✔ Continues sending heartbeat to the existing backend
+✔ Makes the Automation Engine show “Online” in Settings
+✔ Requires no external infrastructure (Fly, AWS, etc.)
+
+After implementing, explain ONLY what lifecycle/bootstrap code was added.

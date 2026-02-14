@@ -11,7 +11,7 @@ A continuous Node.js background worker using Playwright to automate inspection r
 ## Architecture
 
 ### Entry Point
-- `index.js` — Validates env vars, sets up signal handlers, starts the main loop, serves health endpoint with uptime/memory/dryRun info
+- `index.js` — Validates env vars, opens a minimal HTTP listener (plain text "worker alive" on `GET /`), then launches the automation main loop. Signal handlers for graceful shutdown.
 
 ### Source Modules (`src/`)
 - `config.js` — Centralized configuration (browser settings, timing, URLs)
@@ -66,8 +66,7 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - Heartbeat sent to control API every cycle
 - Graceful shutdown on SIGINT/SIGTERM with 5s grace period for worker to finish current operation
 - Dry run mode (default) prevents accidental rescheduling
-- Health endpoint reports uptime, memory usage, dry run status, and timestamp
-- Self-ping auto-detect always uses HTTPS and strips port numbers to avoid SSL issues
+- Minimal HTTP listener returns "worker alive" so Replit Deployments keep the process running
 
 ## Required Environment Variables
 - `PORTAL_USERNAME` — San José portal login username
@@ -78,16 +77,14 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `DRY_RUN` — Set to `false` to enable live rescheduling (default: true/dry run mode)
 - `MAX_INSPECTIONS_PER_CYCLE` — Max inspections to process per cycle (default: 3)
 - `MAX_SCREENSHOTS` — Maximum number of screenshots to keep before auto-cleanup (default: 50)
-- `SELF_PING_URL` — URL for keep-alive self-ping (auto-detected from incoming requests if not set)
 - `CHROMIUM_PATH` — Path to Chromium binary (auto-configured)
 - `DEBUG` — Set to `true` to enable debug logging
 
 ## Deployment
-- Deployment target: VM (always-on, long-running process)
+- Deployment target: Autoscale (HTTP listener keeps process alive)
 - Command: `node index.js`
 
 ## Dependencies
 - playwright (browser automation)
 - axios (HTTP client)
-- express (health endpoint server)
 - chromium (system-level browser binary)
