@@ -14,11 +14,18 @@ function validateEnv() {
   }
 }
 
+let isShuttingDown = false;
+
 async function shutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  process.shuttingDown = true;
   logger.info(`Received ${signal}, shutting down gracefully...`);
   if (keepAliveInterval) clearInterval(keepAliveInterval);
-  await closeBrowser();
-  process.exit(0);
+  setTimeout(async () => {
+    await closeBrowser();
+    process.exit(0);
+  }, 5000);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
@@ -68,8 +75,8 @@ function tryAutoDetectAndStartKeepAlive(req) {
   if (getSelfUrl()) return;
 
   if (req.headers.host) {
-    const protocol = req.headers['x-forwarded-proto'] || 'https';
-    const autoUrl = `${protocol}://${req.headers.host}/health`;
+    const host = req.headers.host.split(':')[0];
+    const autoUrl = `https://${host}/health`;
     logger.info(`Auto-detected self URL from request: ${autoUrl}`);
     startKeepAlive(autoUrl);
   }
@@ -77,7 +84,14 @@ function tryAutoDetectAndStartKeepAlive(req) {
 
 function healthResponse(req, res) {
   tryAutoDetectAndStartKeepAlive(req);
-  res.status(200).json({ status: 'ok', worker: workerStatus, uptime: process.uptime() });
+  res.status(200).json({
+    status: 'ok',
+    worker: workerStatus,
+    uptime: Math.floor(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    dryRun: (process.env.DRY_RUN || '').trim().toLowerCase() !== 'false',
+    timestamp: new Date().toISOString(),
+  });
 }
 
 app.get('/', healthResponse);

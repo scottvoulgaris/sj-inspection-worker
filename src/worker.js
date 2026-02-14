@@ -21,33 +21,45 @@ function backoffDelay(attempt) {
   return Math.floor(withJitter);
 }
 
+function toLocalMidnight(year, month, day) {
+  return new Date(year, month, day, 0, 0, 0, 0);
+}
+
 function parseFlexibleDate(dateStr) {
   if (!dateStr) return null;
+  const s = String(dateStr).trim();
+  if (!s) return null;
   const currentYear = new Date().getFullYear();
-  let parsed = new Date(dateStr);
+
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return toLocalMidnight(parseInt(isoMatch[1], 10), parseInt(isoMatch[2], 10) - 1, parseInt(isoMatch[3], 10));
+  }
+
+  const mdyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (mdyMatch) {
+    const [, m, d, y] = mdyMatch;
+    const fullYear = y.length === 2 ? 2000 + parseInt(y, 10) : parseInt(y, 10);
+    return toLocalMidnight(fullYear, parseInt(m, 10) - 1, parseInt(d, 10));
+  }
+
+  let parsed = new Date(s);
   if (isNaN(parsed.getTime())) {
-    parsed = new Date(`${dateStr}, ${currentYear}`);
+    parsed = new Date(`${s}, ${currentYear}`);
   }
   if (isNaN(parsed.getTime())) {
-    parsed = new Date(`${dateStr} ${currentYear}`);
+    parsed = new Date(`${s} ${currentYear}`);
   }
   if (isNaN(parsed.getTime())) return null;
-  if (parsed.getFullYear() < 2020) {
-    parsed.setFullYear(currentYear);
-  }
-  parsed.setHours(0, 0, 0, 0);
-  return parsed;
+
+  const yr = parsed.getFullYear() < 2020 ? currentYear : parsed.getFullYear();
+  return toLocalMidnight(yr, parsed.getMonth(), parsed.getDate());
 }
 
 async function processInspection(page, inspection) {
   const { id, permitNumber, projectName, inspectionType, currentScheduledDate, desiredDate, targetDate: overrideDate } = inspection;
   logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
   logger.info(`  Current scheduled: ${currentScheduledDate}, Preferred/desired: ${desiredDate || 'none'}, Override target: ${overrideDate || 'none'}`);
-
-  if (isSessionExpired(page)) {
-    logger.info('Session expired, re-authenticating');
-    await login(page);
-  }
 
   const { inspPage } = await navigateToInspections(page, permitNumber);
   const availableDates = await getAvailableDates(inspPage);
@@ -255,6 +267,11 @@ async function mainLoop() {
   let cycleCount = 0;
 
   while (true) {
+    if (process.shuttingDown) {
+      logger.info('Shutdown signal received, exiting main loop');
+      break;
+    }
+
     cycleCount++;
     logger.info(`--- Cycle ${cycleCount} ---`);
 

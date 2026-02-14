@@ -5,6 +5,33 @@ const logger = require('./logger');
 
 fs.mkdirSync(config.screenshotDir, { recursive: true });
 
+const MAX_SCREENSHOTS = parseInt(process.env.MAX_SCREENSHOTS, 10) || 50;
+
+function cleanupOldScreenshots() {
+  try {
+    const files = fs.readdirSync(config.screenshotDir)
+      .filter(f => f.endsWith('.png'))
+      .map(f => ({
+        name: f,
+        path: path.join(config.screenshotDir, f),
+        mtime: fs.statSync(path.join(config.screenshotDir, f)).mtimeMs,
+      }))
+      .sort((a, b) => b.mtime - a.mtime);
+
+    if (files.length > MAX_SCREENSHOTS) {
+      const toDelete = files.slice(MAX_SCREENSHOTS);
+      for (const f of toDelete) {
+        fs.unlinkSync(f.path);
+      }
+      if (toDelete.length > 0) {
+        logger.info(`Cleaned up ${toDelete.length} old screenshots (keeping ${MAX_SCREENSHOTS})`);
+      }
+    }
+  } catch (err) {
+    logger.warn(`Screenshot cleanup failed: ${err.message}`);
+  }
+}
+
 class PermitNotFoundError extends Error {
   constructor(message) {
     super(message);
@@ -18,6 +45,7 @@ function screenshotPath(label) {
 }
 
 async function takeScreenshot(page, label) {
+  cleanupOldScreenshots();
   fs.mkdirSync(config.screenshotDir, { recursive: true });
   const filePath = path.resolve(screenshotPath(label));
   try {
@@ -181,8 +209,6 @@ async function navigateToInspections(page, permitNumber) {
 async function getAvailableDates(page) {
   logger.info('Extracting available inspection dates');
 
-  const screenshotTarget = page.page ? page.page() : page;
-
   const selects = await page.$$('select');
   logger.info(`Found ${selects.length} select element(s) on page`);
 
@@ -202,7 +228,7 @@ async function getAvailableDates(page) {
 
   if (!dateSelect) {
     logger.warn('No date dropdown found on page');
-    await takeScreenshot(screenshotTarget, 'no-date-dropdown');
+    await takeScreenshot(page, 'no-date-dropdown');
     return [];
   }
 
@@ -214,28 +240,46 @@ async function getAvailableDates(page) {
 
   logger.info(`Date options: ${options.map((o) => o.text).join(', ')}`);
 
-  const currentYear = new Date().getFullYear();
+  const toLocalMidnight = (year, month, day) => new Date(year, month, day, 0, 0, 0, 0);
+
+  const tryParseMDY = (str) => {
+    if (!str) return null;
+    const mdyMatch = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (!mdyMatch) return null;
+    const [, m, d, y] = mdyMatch;
+    const fullYear = y.length === 2 ? 2000 + parseInt(y, 10) : parseInt(y, 10);
+    return toLocalMidnight(fullYear, parseInt(m, 10) - 1, parseInt(d, 10));
+  };
+
+  const parseOptionDate = (text, value) => {
+    const currentYear = new Date().getFullYear();
+
+    let mdy = tryParseMDY(text) || tryParseMDY(value);
+    if (mdy) return mdy;
+
+    const isoMatch = (text || '').match(/^(\d{4})-(\d{2})-(\d{2})/) || (value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) {
+      return toLocalMidnight(parseInt(isoMatch[1], 10), parseInt(isoMatch[2], 10) - 1, parseInt(isoMatch[3], 10));
+    }
+
+    let parsed = new Date(text);
+    if (isNaN(parsed.getTime())) parsed = new Date(`${text}, ${currentYear}`);
+    if (isNaN(parsed.getTime())) parsed = new Date(`${text} ${currentYear}`);
+    if (isNaN(parsed.getTime())) parsed = new Date(value);
+    if (isNaN(parsed.getTime())) parsed = new Date(`${value}, ${currentYear}`);
+    if (isNaN(parsed.getTime())) return null;
+
+    const yr = parsed.getFullYear() < 2020 ? currentYear : parsed.getFullYear();
+    return toLocalMidnight(yr, parsed.getMonth(), parsed.getDate());
+  };
 
   const dates = options
     .map((o) => {
-      let parsed = new Date(o.text);
-      if (isNaN(parsed.getTime())) {
-        parsed = new Date(`${o.text}, ${currentYear}`);
-      }
-      if (isNaN(parsed.getTime())) {
-        parsed = new Date(o.value);
-      }
-      if (isNaN(parsed.getTime())) {
-        parsed = new Date(`${o.value}, ${currentYear}`);
-      }
-      if (isNaN(parsed.getTime())) {
+      const parsed = parseOptionDate(o.text, o.value);
+      if (!parsed) {
         logger.warn(`Could not parse date from option: text="${o.text}" value="${o.value}"`);
         return null;
       }
-      if (parsed.getFullYear() !== currentYear) {
-        parsed.setFullYear(currentYear);
-      }
-      parsed.setHours(0, 0, 0, 0);
       return { raw: o.value, text: o.text, date: parsed };
     })
     .filter(Boolean)
@@ -251,8 +295,6 @@ async function getAvailableDates(page) {
 async function rescheduleInspection(page, targetDate) {
   logger.info(`Attempting reschedule to ${targetDate.text} (${targetDate.raw})`);
 
-  const screenshotTarget = page.page ? page.page() : page;
-
   const dateSelect = page.locator('select').filter({ hasText: /monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december/i }).first();
   const selectCount = await dateSelect.count();
   if (selectCount === 0) {
@@ -262,12 +304,12 @@ async function rescheduleInspection(page, targetDate) {
   await dateSelect.selectOption(targetDate.raw);
   logger.info(`Selected date: ${targetDate.text}`);
   await page.waitForTimeout(1_000);
-  await takeScreenshot(screenshotTarget, 'pre-resubmit');
+  await takeScreenshot(page, 'pre-resubmit');
 
   const resubmitBtn = page.locator('input[value*="Resubmit"], button:has-text("Resubmit")').first();
   const btnCount = await resubmitBtn.count();
   if (btnCount === 0) {
-    await takeScreenshot(screenshotTarget, 'no-resubmit-button');
+    await takeScreenshot(page, 'no-resubmit-button');
     throw new Error('"Resubmit Request" button not found on Modify page');
   }
 
@@ -280,7 +322,7 @@ async function rescheduleInspection(page, targetDate) {
   await page.waitForLoadState('domcontentloaded').catch(() => null);
   await page.waitForTimeout(2_000);
 
-  const screenshotFile = await takeScreenshot(screenshotTarget, 'post-resubmit');
+  const screenshotFile = await takeScreenshot(page, 'post-resubmit');
 
   const pageText = await page.textContent('body').catch(() => '');
   const success =
