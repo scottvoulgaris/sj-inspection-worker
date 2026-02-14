@@ -32,7 +32,7 @@ async function takeScreenshot(page, label) {
 
 async function login(page) {
   logger.info('Navigating to login page');
-  await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded' });
+  await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded', timeout: config.timing.navigationTimeoutMs });
 
   const usernameSelector = 'input[name="email"], input[type="email"], #email, input[name="username"], input[name="userid"], input[type="text"]';
   try {

@@ -23,7 +23,7 @@ const config = {
     cyclePauseMs: 60_000,
     jitterMinMs: 2_000,
     jitterMaxMs: 8_000,
-    navigationTimeoutMs: 30_000,
+    navigationTimeoutMs: 60_000,
     maxRetries: 5,
     backoffBaseMs: 1_000,
     backoffMaxMs: 120_000,
