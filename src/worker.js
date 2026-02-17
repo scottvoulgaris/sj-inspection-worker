@@ -21,8 +21,16 @@ function backoffDelay(attempt) {
   return Math.floor(withJitter);
 }
 
+const MIN_DAYS_OUT = 2;
+
 function toLocalMidnight(year, month, day) {
   return new Date(year, month, day, 0, 0, 0, 0);
+}
+
+function getEarliestAllowedDate() {
+  const now = new Date();
+  const earliest = toLocalMidnight(now.getFullYear(), now.getMonth(), now.getDate() + MIN_DAYS_OUT + 1);
+  return earliest;
 }
 
 function parseFlexibleDate(dateStr) {
@@ -101,9 +109,12 @@ async function processInspection(page, inspection) {
     }
   }
 
+  const earliestAllowed = getEarliestAllowedDate();
+  logger.info(`Minimum selectable date (${MIN_DAYS_OUT}-day buffer): ${earliestAllowed.toISOString()}`);
+
   if (preferredDateObj && currentDateObj.getTime() < preferredDateObj.getTime()) {
     logger.warn(`Inspection ${id} is scheduled TOO SOON: current ${currentDateObj.toISOString()} is before preferred ${preferredDateObj.toISOString()}`);
-    const correctionDates = availableDates.filter((d) => d.date.getTime() >= preferredDateObj.getTime());
+    const correctionDates = availableDates.filter((d) => d.date.getTime() >= preferredDateObj.getTime() && d.date.getTime() >= earliestAllowed.getTime());
     if (correctionDates.length === 0) {
       logger.warn(`No available dates on or after preferred date ${desiredDate} to correct inspection ${id}`);
       return {
@@ -149,8 +160,9 @@ async function processInspection(page, inspection) {
   let eligibleDates = availableDates.filter((d) => {
     const isEarlier = d.date.getTime() < currentDateObj.getTime();
     const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
-    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()} preferred=${preferredDateObj ? preferredDateObj.toISOString() : 'none'} → earlier=${isEarlier}, afterPreferred=${isOnOrAfterPreferred}`);
-    return isEarlier && isOnOrAfterPreferred;
+    const isFarEnoughOut = d.date.getTime() >= earliestAllowed.getTime();
+    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()} preferred=${preferredDateObj ? preferredDateObj.toISOString() : 'none'} earliest=${earliestAllowed.toISOString()} → earlier=${isEarlier}, afterPreferred=${isOnOrAfterPreferred}, farEnough=${isFarEnoughOut}`);
+    return isEarlier && isOnOrAfterPreferred && isFarEnoughOut;
   });
 
   if (eligibleDates.length === 0) {
@@ -210,6 +222,19 @@ async function processOverrideReschedule(inspPage, inspection, availableDates) {
   }
 
   logger.info(`Override reschedule requested to: ${overrideDateObj.toISOString()}`);
+
+  const earliestAllowed = getEarliestAllowedDate();
+  if (overrideDateObj.getTime() < earliestAllowed.getTime()) {
+    logger.warn(`Override target date ${overrideDateStr} is within ${MIN_DAYS_OUT} days of today (earliest allowed: ${earliestAllowed.toISOString()})`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'target_date_too_soon',
+      requestedDate: overrideDateStr,
+      earliestAllowed: earliestAllowed.toISOString(),
+      availableDates: availableDates.map((d) => d.text),
+    };
+  }
 
   const match = availableDates.find((d) => d.date.getTime() === overrideDateObj.getTime());
   if (!match) {

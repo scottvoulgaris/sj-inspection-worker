@@ -34,10 +34,11 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `parseFlexibleDate(dateStr)` — Robust date parser handles text dates ("Monday, March 2"), ISO dates, and MM/DD/YYYY format. Auto-corrects years < 2020 to current year. Normalizes to local midnight for consistent day-level comparison.
 - `parseOptionDate(text, value)` — Portal-specific date parser in `getAvailableDates` that tries text first, then value, including MM/DD/YYYY format on value. Same normalization as `parseFlexibleDate`.
 - Both parsers extract year/month/day components explicitly before constructing Date objects via `new Date(year, month, day)` to avoid UTC-vs-local timezone drift that occurs with `new Date(string)`.
+- **2-day buffer rule**: Any candidate date within 2 days of today is rejected (e.g., if today is Feb 17, the earliest selectable date is Feb 20). This applies to all three reschedule paths (normal, too-soon correction, and override).
 - If `currentScheduledDate` is **before** `desiredDate` (scheduled too soon), worker immediately reschedules to the first available date on or after `desiredDate` — status `rescheduled` with `reason: 'scheduled_too_soon'`
-- Otherwise, candidate dates must be **earlier** than `currentScheduledDate` AND **on or after** `desiredDate` (preferred date)
-- If `desiredDate` is missing or unparseable, only the "earlier than current" filter applies
-- If inspection includes `targetDate` field (override), worker skips normal filtering and reschedules directly to that specific date if available in dropdown
+- Otherwise, candidate dates must be **earlier** than `currentScheduledDate` AND **on or after** `desiredDate` (preferred date) AND beyond the 2-day buffer
+- If `desiredDate` is missing or unparseable, only the "earlier than current" and 2-day buffer filters apply
+- If inspection includes `targetDate` field (override), worker checks the 2-day buffer first, then reschedules directly to that specific date if available in dropdown
 
 ### Override Reschedule (Remedy)
 - Control API can send a `targetDate` field on an inspection to force reschedule to a specific date
