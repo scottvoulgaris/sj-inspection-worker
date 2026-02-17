@@ -82,10 +82,61 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `DEBUG` — Set to `true` to enable debug logging
 
 ## Deployment
-- Deployment target: Autoscale (HTTP listener keeps process alive)
+
+### Replit (Development)
+- Deployment target: Autoscale (HTTP listener keeps process alive, but spins down after idle)
 - Command: `node index.js`
+- `CHROMIUM_PATH` env var points to the Nix Chromium binary
+
+### Fly.io (Production — Always Running)
+Fly.io runs this as a persistent VM that never spins down.
+
+**Files:**
+- `Dockerfile` — Node.js 20 + Playwright Chromium deps + app code
+- `fly.toml` — Fly.io config (sjc region, shared-cpu-1x, 512MB, auto_stop=off)
+- `.dockerignore` — Excludes node_modules, screenshots, Replit files from Docker image
+
+**First-time setup:**
+```bash
+# Install flyctl CLI (https://fly.io/docs/flyctl/install/)
+curl -L https://fly.io/install.sh | sh
+
+# Login to Fly.io
+fly auth login
+
+# Create the app (only once)
+fly apps create inspection-automation-worker
+
+# Set secrets (required)
+fly secrets set PORTAL_USERNAME="your-username"
+fly secrets set PORTAL_PASSWORD="your-password"
+fly secrets set CONTROL_APP_URL="https://inspection-scheduler-accelerator.replit.app"
+fly secrets set DRY_RUN="false"
+
+# Deploy
+fly deploy
+```
+
+**Subsequent deploys:**
+```bash
+fly deploy
+```
+
+**Useful commands:**
+```bash
+fly logs                    # View live logs
+fly status                  # Check machine status
+fly ssh console             # SSH into the running machine
+fly secrets list            # List set secrets
+```
+
+**Notes:**
+- When `CHROMIUM_PATH` is not set (Docker/Fly.io), Playwright uses its own bundled Chromium
+- Region `sjc` (San José) is closest to the portal server for lowest latency
+- `auto_stop_machines = "off"` ensures the worker runs 24/7
+- `min_machines_running = 1` guarantees at least one machine is always up
 
 ## Dependencies
 - playwright (browser automation)
 - axios (HTTP client)
-- chromium (system-level browser binary)
+- chromium (system-level, Nix on Replit / Playwright-bundled on Fly.io)
