@@ -31,13 +31,21 @@ async function launchBrowser() {
 }
 
 async function newPage() {
+  logger.info('newPage: getting browser');
   const b = await launchBrowser();
+
+  logger.info('newPage: creating context');
   const context = await b.newContext({
     viewport: { width: 1280, height: 800 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
   });
+  logger.info('newPage: context created');
+
+  logger.info('newPage: creating page');
   const page = await context.newPage();
+  logger.info('newPage: page created');
+
   page.setDefaultTimeout(config.timing.navigationTimeoutMs);
   return page;
 }
