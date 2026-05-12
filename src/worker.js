@@ -1,12 +1,25 @@
 const config = require('./config');
 const logger = require('./logger');
 const { newPage, closeBrowser } = require('./browser');
-const { login, navigateToInspections, getAvailableDates, rescheduleInspection, isSessionExpired, takeScreenshot, PermitNotFoundError } = require('./portal');
-const { fetchPrioritizedInspections, postAutomationResult, sendHeartbeat, fetchAutomationSettings } = require('./api');
+const {
+  login,
+  navigateToInspections,
+  getAvailableDates,
+  rescheduleInspection,
+  isSessionExpired,
+  takeScreenshot,
+  PermitNotFoundError,
+} = require('./portal');
+const {
+  fetchPrioritizedInspections,
+  postAutomationResult,
+  sendHeartbeat,
+  fetchAutomationSettings,
+} = require('./api');
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const DEFAULT_NOTICE_HOURS = 24;
+
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 function jitter() {
   const { jitterMinMs, jitterMaxMs } = config.timing;
@@ -21,16 +34,29 @@ function backoffDelay(attempt) {
   return Math.floor(withJitter);
 }
 
-const MIN_DAYS_OUT = 2;
-
 function toLocalMidnight(year, month, day) {
   return new Date(year, month, day, 0, 0, 0, 0);
 }
 
-function getEarliestAllowedDate() {
+function todayLocalMidnight() {
+  const n = new Date();
+  return toLocalMidnight(n.getFullYear(), n.getMonth(), n.getDate());
+}
+
+function normalizeNoticeHours(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_NOTICE_HOURS;
+}
+
+// A full date D is allowed iff midnight(D) is >= (now + noticeHours).
+// In practice: take now + noticeHours, round up to next day boundary.
+function getEarliestAllowedDate(noticeHours) {
+  const hours = normalizeNoticeHours(noticeHours);
   const now = new Date();
-  const earliest = toLocalMidnight(now.getFullYear(), now.getMonth(), now.getDate() + MIN_DAYS_OUT + 1);
-  return earliest;
+  const cutoff = new Date(now.getTime() + hours * 60 * 60 * 1000);
+  const floor = toLocalMidnight(cutoff.getFullYear(), cutoff.getMonth(), cutoff.getDate());
+  if (floor.getTime() < cutoff.getTime()) floor.setDate(floor.getDate() + 1);
+  return floor;
 }
 
 function parseFlexibleDate(dateStr) {
@@ -40,9 +66,7 @@ function parseFlexibleDate(dateStr) {
   const currentYear = new Date().getFullYear();
 
   const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) {
-    return toLocalMidnight(parseInt(isoMatch[1], 10), parseInt(isoMatch[2], 10) - 1, parseInt(isoMatch[3], 10));
-  }
+  if (isoMatch) return toLocalMidnight(parseInt(isoMatch[1], 10), parseInt(isoMatch[2], 10) - 1, parseInt(isoMatch[3], 10));
 
   const mdyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
   if (mdyMatch) {
@@ -52,43 +76,88 @@ function parseFlexibleDate(dateStr) {
   }
 
   let parsed = new Date(s);
-  if (isNaN(parsed.getTime())) {
-    parsed = new Date(`${s}, ${currentYear}`);
-  }
-  if (isNaN(parsed.getTime())) {
-    parsed = new Date(`${s} ${currentYear}`);
-  }
+  if (isNaN(parsed.getTime())) parsed = new Date(`${s}, ${currentYear}`);
+  if (isNaN(parsed.getTime())) parsed = new Date(`${s} ${currentYear}`);
   if (isNaN(parsed.getTime())) return null;
-
   const yr = parsed.getFullYear() < 2020 ? currentYear : parsed.getFullYear();
   return toLocalMidnight(yr, parsed.getMonth(), parsed.getDate());
 }
 
 async function processInspection(page, inspection) {
-  const { id, permitNumber, projectName, inspectionType, currentScheduledDate, desiredDate, targetDate: overrideDate } = inspection;
-  logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
-  logger.info(`  Current scheduled: ${currentScheduledDate}, Preferred/desired: ${desiredDate || 'none'}, Override target: ${overrideDate || 'none'}`);
+  const {
+    id,
+    permitNumber,
+    projectName,
+    inspectionType,
+    currentScheduledDate,
+    desiredDate,
+    targetDate: overrideDate,
+    minNoticeHours,
+    confirmationNumber,
+  } = inspection;
 
-  const { inspPage } = await navigateToInspections(page, permitNumber);
+  const noticeHours = normalizeNoticeHours(minNoticeHours);
+  logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
+  logger.info(`  Current: ${currentScheduledDate}, Desired: ${desiredDate || 'none'}, Override: ${overrideDate || 'none'}, Notice: ${noticeHours}h, Confirmation: ${confirmationNumber || 'auto'}`);
+
+  // Defensive past-due skip. The control app should already filter these via auto-lock,
+  // but if we see one slip through we refuse to touch it.
+  const currentDateObj = parseFlexibleDate(currentScheduledDate);
+  const today = todayLocalMidnight();
+  if (currentDateObj && currentDateObj.getTime() <= today.getTime()) {
+    logger.info(`Inspection ${id} is past-due (${currentScheduledDate} <= today). Skipping.`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'locked_date_reached',
+      oldDate: currentScheduledDate,
+    };
+  }
+
+  const nav = await navigateToInspections(page, permitNumber, { confirmationNumber });
+
+  if (nav.status === 'no_inspection_time') {
+    return { inspectionId: id, permitNumber, status: 'no_inspection_time' };
+  }
+  if (nav.status === 'no_existing_inspections') {
+    return { inspectionId: id, permitNumber, status: 'no_existing_inspections' };
+  }
+  if (nav.status === 'multiple_confirmations') {
+    logger.warn(`Permit ${permitNumber} has ${nav.confirmations.length} confirmations; selection required.`);
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'multiple_confirmations_pending_selection',
+      confirmations: nav.confirmations,
+    };
+  }
+  if (nav.status === 'confirmation_not_found') {
+    return {
+      inspectionId: id,
+      permitNumber,
+      status: 'confirmation_not_found',
+      requestedConfirmation: confirmationNumber,
+      confirmations: nav.confirmations,
+    };
+  }
+  if (nav.status !== 'ok') {
+    logger.error(`Unexpected nav status: ${nav.status}`);
+    return { inspectionId: id, permitNumber, status: 'error', error: `Unexpected nav status: ${nav.status}` };
+  }
+
+  const { inspPage } = nav;
   const availableDates = await getAvailableDates(inspPage);
 
   if (availableDates.length === 0) {
     logger.info(`No available dates for inspection ${id} (permit ${permitNumber})`);
-    return {
-      inspectionId: id,
-      permitNumber,
-      status: 'no_dates_available',
-      availableDates: [],
-    };
+    return { inspectionId: id, permitNumber, status: 'no_dates_available', availableDates: [] };
   }
 
   if (overrideDate) {
-    return await processOverrideReschedule(inspPage, inspection, availableDates);
+    return await processOverrideReschedule(inspPage, inspection, availableDates, noticeHours);
   }
 
-  const currentDateObj = parseFlexibleDate(currentScheduledDate);
   if (!currentDateObj) {
-    logger.error(`Could not parse currentScheduledDate: "${currentScheduledDate}" for inspection ${id}`);
     return {
       inspectionId: id,
       permitNumber,
@@ -97,59 +166,51 @@ async function processInspection(page, inspection) {
       availableDates: availableDates.map((d) => d.text),
     };
   }
-  logger.info(`Current scheduled date parsed: ${currentDateObj.toISOString()}`);
 
   let preferredDateObj = null;
   if (desiredDate) {
     preferredDateObj = parseFlexibleDate(desiredDate);
-    if (preferredDateObj) {
-      logger.info(`Preferred/desired date parsed: ${preferredDateObj.toISOString()}`);
-    } else {
-      logger.warn(`Could not parse desiredDate: "${desiredDate}" — will ignore preferred date filter`);
-    }
+    if (!preferredDateObj) logger.warn(`Could not parse desiredDate: "${desiredDate}" — ignoring`);
   }
 
-  const earliestAllowed = getEarliestAllowedDate();
-  logger.info(`Minimum selectable date (${MIN_DAYS_OUT}-day buffer): ${earliestAllowed.toISOString()}`);
+  const earliestAllowed = getEarliestAllowedDate(noticeHours);
+  logger.info(`Earliest allowed (${noticeHours}h notice): ${earliestAllowed.toISOString()}`);
 
+  // Scheduled-too-soon correction path.
   if (preferredDateObj && currentDateObj.getTime() < preferredDateObj.getTime()) {
-    logger.warn(`Inspection ${id} is scheduled TOO SOON: current ${currentDateObj.toISOString()} is before preferred ${preferredDateObj.toISOString()}`);
-    const correctionDates = availableDates.filter((d) => d.date.getTime() >= preferredDateObj.getTime() && d.date.getTime() >= earliestAllowed.getTime());
+    const correctionDates = availableDates.filter(
+      (d) => d.date.getTime() >= preferredDateObj.getTime() && d.date.getTime() >= earliestAllowed.getTime()
+    );
     if (correctionDates.length === 0) {
-      logger.warn(`No available dates on or after preferred date ${desiredDate} to correct inspection ${id}`);
       return {
         inspectionId: id,
         permitNumber,
         status: 'scheduled_too_soon_no_correction',
-        currentScheduledDate,
+        oldDate: currentScheduledDate,
         desiredDate,
         availableDates: availableDates.map((d) => d.text),
       };
     }
     const correctionDate = correctionDates[0];
-    logger.info(`Correction target: ${correctionDate.text} (${correctionDate.date.toISOString()}) — first available on/after preferred ${desiredDate}`);
-
     if (config.dryRun) {
-      logger.info(`DRY RUN — Would correct inspection ${id} from ${currentScheduledDate} to ${correctionDate.text} (scheduled before preferred date). No changes made.`);
       return {
         inspectionId: id,
         permitNumber,
         status: 'dry_run',
         reason: 'scheduled_too_soon',
-        previousDate: currentScheduledDate,
+        oldDate: currentScheduledDate,
         proposedDate: correctionDate.text,
         desiredDate,
         availableDates: availableDates.map((d) => d.text),
       };
     }
-
     const result = await rescheduleInspection(inspPage, correctionDate);
     return {
       inspectionId: id,
       permitNumber,
       status: result.success ? 'rescheduled' : 'reschedule_uncertain',
       reason: 'scheduled_too_soon',
-      previousDate: currentScheduledDate,
+      oldDate: currentScheduledDate,
       newDate: correctionDate.text,
       desiredDate,
       screenshotFile: result.screenshotFile,
@@ -157,36 +218,32 @@ async function processInspection(page, inspection) {
     };
   }
 
-  let eligibleDates = availableDates.filter((d) => {
+  // Standard earlier-date path.
+  const eligibleDates = availableDates.filter((d) => {
     const isEarlier = d.date.getTime() < currentDateObj.getTime();
     const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
     const isFarEnoughOut = d.date.getTime() >= earliestAllowed.getTime();
-    logger.info(`Comparing: candidate=${d.date.toISOString()} current=${currentDateObj.toISOString()} preferred=${preferredDateObj ? preferredDateObj.toISOString() : 'none'} earliest=${earliestAllowed.toISOString()} → earlier=${isEarlier}, afterPreferred=${isOnOrAfterPreferred}, farEnough=${isFarEnoughOut}`);
     return isEarlier && isOnOrAfterPreferred && isFarEnoughOut;
   });
 
   if (eligibleDates.length === 0) {
-    logger.info(`No eligible earlier dates for inspection ${id} (permit ${permitNumber}, current: ${currentScheduledDate}, preferred: ${desiredDate || 'none'})`);
     return {
       inspectionId: id,
       permitNumber,
       status: 'no_earlier_date',
-      currentScheduledDate,
+      oldDate: currentScheduledDate,
       desiredDate: desiredDate || null,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
   const bestDate = eligibleDates[0];
-  logger.info(`Found eligible earlier date: ${bestDate.text} (${bestDate.date.toISOString()}) vs current: ${currentScheduledDate} (${currentDateObj.toISOString()})${preferredDateObj ? ` [preferred: ${desiredDate}]` : ''}`);
-
   if (config.dryRun) {
-    logger.info(`DRY RUN — Would reschedule inspection ${id} (permit ${permitNumber}) from ${currentScheduledDate} to ${bestDate.text}. No changes made.`);
     return {
       inspectionId: id,
       permitNumber,
       status: 'dry_run',
-      previousDate: currentScheduledDate,
+      oldDate: currentScheduledDate,
       proposedDate: bestDate.text,
       desiredDate: desiredDate || null,
       availableDates: availableDates.map((d) => d.text),
@@ -194,12 +251,11 @@ async function processInspection(page, inspection) {
   }
 
   const result = await rescheduleInspection(inspPage, bestDate);
-
   return {
     inspectionId: id,
     permitNumber,
     status: result.success ? 'rescheduled' : 'reschedule_uncertain',
-    previousDate: currentScheduledDate,
+    oldDate: currentScheduledDate,
     newDate: bestDate.text,
     desiredDate: desiredDate || null,
     screenshotFile: result.screenshotFile,
@@ -207,29 +263,21 @@ async function processInspection(page, inspection) {
   };
 }
 
-async function processOverrideReschedule(inspPage, inspection, availableDates) {
+async function processOverrideReschedule(inspPage, inspection, availableDates, noticeHours) {
   const { id, permitNumber, targetDate: overrideDateStr, currentScheduledDate } = inspection;
   const overrideDateObj = parseFlexibleDate(overrideDateStr);
   if (!overrideDateObj) {
-    logger.error(`Could not parse override targetDate: "${overrideDateStr}" for inspection ${id}`);
     return {
-      inspectionId: id,
-      permitNumber,
-      status: 'error',
+      inspectionId: id, permitNumber, status: 'error',
       error: `Could not parse override target date: ${overrideDateStr}`,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
-  logger.info(`Override reschedule requested to: ${overrideDateObj.toISOString()}`);
-
-  const earliestAllowed = getEarliestAllowedDate();
+  const earliestAllowed = getEarliestAllowedDate(noticeHours);
   if (overrideDateObj.getTime() < earliestAllowed.getTime()) {
-    logger.warn(`Override target date ${overrideDateStr} is within ${MIN_DAYS_OUT} days of today (earliest allowed: ${earliestAllowed.toISOString()})`);
     return {
-      inspectionId: id,
-      permitNumber,
-      status: 'target_date_too_soon',
+      inspectionId: id, permitNumber, status: 'target_date_too_soon',
       requestedDate: overrideDateStr,
       earliestAllowed: earliestAllowed.toISOString(),
       availableDates: availableDates.map((d) => d.text),
@@ -238,40 +286,27 @@ async function processOverrideReschedule(inspPage, inspection, availableDates) {
 
   const match = availableDates.find((d) => d.date.getTime() === overrideDateObj.getTime());
   if (!match) {
-    logger.warn(`Override target date ${overrideDateStr} is not available in dropdown`);
     return {
-      inspectionId: id,
-      permitNumber,
-      status: 'target_date_unavailable',
+      inspectionId: id, permitNumber, status: 'target_date_unavailable',
       requestedDate: overrideDateStr,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
-  logger.info(`Override target date found in dropdown: ${match.text}`);
-
   if (config.dryRun) {
-    logger.info(`DRY RUN — Would override-reschedule inspection ${id} to ${match.text}. No changes made.`);
     return {
-      inspectionId: id,
-      permitNumber,
-      status: 'dry_run',
-      previousDate: currentScheduledDate,
-      proposedDate: match.text,
+      inspectionId: id, permitNumber, status: 'dry_run',
+      oldDate: currentScheduledDate, proposedDate: match.text,
       availableDates: availableDates.map((d) => d.text),
     };
   }
 
   const result = await rescheduleInspection(inspPage, match);
-
   return {
-    inspectionId: id,
-    permitNumber,
+    inspectionId: id, permitNumber,
     status: result.success ? 'rescheduled' : 'reschedule_uncertain',
-    previousDate: currentScheduledDate,
-    newDate: match.text,
-    override: true,
-    screenshotFile: result.screenshotFile,
+    oldDate: currentScheduledDate, newDate: match.text,
+    override: true, screenshotFile: result.screenshotFile,
     availableDates: availableDates.map((d) => d.text),
   };
 }
@@ -292,133 +327,82 @@ async function mainLoop() {
   let cycleCount = 0;
 
   while (true) {
-    if (process.shuttingDown) {
-      logger.info('Shutdown signal received, exiting main loop');
-      break;
-    }
-
+    if (process.shuttingDown) { logger.info('Shutdown signal received'); break; }
     cycleCount++;
     logger.info(`--- Cycle ${cycleCount} ---`);
-
     let page = null;
 
     try {
-      await sendHeartbeat({
-        cycle: cycleCount,
-        consecutiveFailures,
-      });
-
+      await sendHeartbeat({ cycle: cycleCount, consecutiveFailures });
       const inspections = await fetchPrioritizedInspections();
-
       if (!inspections || inspections.length === 0) {
-        logger.info('No inspections to process, waiting for next cycle');
         consecutiveFailures = 0;
         await sleep(config.timing.cyclePauseMs);
         continue;
       }
-
       const toProcess = inspections.slice(0, config.maxInspectionsPerCycle);
-      logger.info(`Processing ${toProcess.length} of ${inspections.length} inspections this cycle`);
-
       page = await newPage();
       await login(page);
 
       for (const inspection of toProcess) {
         let attempt = 0;
         let processed = false;
-
         while (attempt < config.timing.maxRetries && !processed) {
           try {
-            if (isSessionExpired(page)) {
-              logger.info('Session expired mid-cycle, re-logging in');
-              await login(page);
-            }
-
+            if (isSessionExpired(page)) await login(page);
             const result = await processInspection(page, inspection);
             await postAutomationResult(result);
             processed = true;
-
             await jitter();
           } catch (err) {
             if (err instanceof PermitNotFoundError) {
-              logger.error(`Permit not found — skipping inspection ${inspection.id} (permit ${inspection.permitNumber}): ${err.message}`);
               await postAutomationResult({
-                inspectionId: inspection.id,
-                permitNumber: inspection.permitNumber,
-                status: 'permit_not_found',
-                error: err.message,
+                inspectionId: inspection.id, permitNumber: inspection.permitNumber,
+                status: 'permit_not_found', error: err.message,
               });
               processed = true;
               break;
             }
-
             attempt++;
             const delay = backoffDelay(attempt);
-            logger.error(
-              `Error processing inspection ${inspection.id} (permit ${inspection.permitNumber}) (attempt ${attempt}/${config.timing.maxRetries})`,
-              err.message
-            );
-
+            logger.error(`Error processing inspection ${inspection.id} (attempt ${attempt}/${config.timing.maxRetries})`, err.message);
             await takeScreenshot(page, `error-${inspection.id}-attempt${attempt}`);
-
             if (err.message.includes('Login failed') || err.message.includes('session')) {
-              logger.info('Attempting fresh login after session error');
-              try {
-                await page.context().close();
-              } catch (_) {}
+              try { await page.context().close(); } catch (_) {}
               page = await newPage();
               await login(page);
             }
-
-            if (attempt < config.timing.maxRetries) {
-              logger.info(`Backing off for ${delay}ms before retry`);
-              await sleep(delay);
-            }
+            if (attempt < config.timing.maxRetries) await sleep(delay);
           }
         }
-
         if (!processed) {
-          logger.error(`Exhausted retries for inspection ${inspection.id} (permit ${inspection.permitNumber})`);
           await postAutomationResult({
-            inspectionId: inspection.id,
-            permitNumber: inspection.permitNumber,
-            status: 'failed',
-            error: 'Max retries exhausted',
+            inspectionId: inspection.id, permitNumber: inspection.permitNumber,
+            status: 'failed', error: 'Max retries exhausted',
           });
         }
       }
-
       consecutiveFailures = 0;
     } catch (err) {
       consecutiveFailures++;
       const delay = backoffDelay(consecutiveFailures);
-      logger.error(`Cycle ${cycleCount} failed (consecutive failures: ${consecutiveFailures})`, err.message);
-
-      if (page) {
-        await takeScreenshot(page, `cycle-error-${cycleCount}`);
-      }
-
-      logger.info(`Backing off for ${delay}ms before next cycle`);
+      logger.error(`Cycle ${cycleCount} failed`, err.message);
+      if (page) await takeScreenshot(page, `cycle-error-${cycleCount}`);
       await sleep(delay);
       continue;
     } finally {
-      if (page) {
-        try {
-          await page.context().close();
-        } catch (_) {}
-      }
+      if (page) { try { await page.context().close(); } catch (_) {} }
     }
 
     const settings = await fetchAutomationSettings();
     if (settings && settings.paused === true) {
-      logger.info('Automation paused. Sleeping 60s.');
       await sleep(60_000);
       continue;
     }
     const pauseMs = settings && settings.pollingIntervalSeconds
       ? settings.pollingIntervalSeconds * 1000
       : 300_000;
-    logger.info(`Cycle ${cycleCount} complete. Sleeping for ${pauseMs}ms`);
+    logger.info(`Cycle ${cycleCount} complete. Sleeping ${pauseMs}ms`);
     await sleep(pauseMs);
   }
 }
