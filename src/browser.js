@@ -9,12 +9,25 @@ async function launchBrowser() {
     return browser;
   }
   logger.info('Launching browser (headless)');
-  browser = await chromium.launch({
-    headless: config.browser.headless,
-    executablePath: config.browser.executablePath,
-    args: config.browser.args,
-  });
-  return browser;
+  logger.info(`  executablePath: ${config.browser.executablePath || '(playwright bundled)'}`);
+  logger.info(`  args: ${JSON.stringify(config.browser.args)}`);
+
+  try {
+    browser = await chromium.launch({
+      headless: config.browser.headless,
+      executablePath: config.browser.executablePath,
+      args: config.browser.args,
+      timeout: 30_000,
+    });
+    logger.info('Browser launched successfully');
+    return browser;
+  } catch (err) {
+    logger.error('Browser launch FAILED');
+    logger.error(`  error name: ${err.name}`);
+    logger.error(`  error message: ${err.message}`);
+    logger.error(`  error stack: ${err.stack}`);
+    throw err;
+  }
 }
 
 async function newPage() {
