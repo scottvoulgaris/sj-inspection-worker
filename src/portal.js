@@ -50,23 +50,41 @@ async function takeScreenshot(page, label) {
 }
 
 async function login(page) {
-  logger.info('Navigating to login page');
-  await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded', timeout: config.timing.navigationTimeoutMs });
+  logger.info(`login: navigating to ${config.portal.loginUrl}`);
+  try {
+    await page.goto(config.portal.loginUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    logger.info(`login: goto returned. current url: ${page.url()}`);
+  } catch (err) {
+    logger.error(`login: goto FAILED — ${err.name}: ${err.message}`);
+    throw err;
+  }
+
   const usernameSelector = 'input[name="email"], input[type="email"], #email, input[name="username"], input[name="userid"], input[type="text"]';
   try {
-    await page.waitForSelector(usernameSelector, { timeout: 60_000 });
-  } catch {
+    logger.info('login: waiting for username field');
+    await page.waitForSelector(usernameSelector, { timeout: 30_000 });
+    logger.info('login: username field appeared');
+  } catch (err) {
     await takeScreenshot(page, 'login-form-not-found');
+    logger.error(`login: username field not found — ${err.message}`);
     throw new Error('Login form not found');
   }
+
+  logger.info('login: filling username');
   await page.fill(usernameSelector, config.portal.username);
+  logger.info('login: filling password');
   await page.fill('input[name="password"], input[type="password"], #password', config.portal.password);
+
+  logger.info('login: clicking submit');
   await Promise.all([
-    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => null),
+    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch((e) => logger.warn(`login: waitForNavigation: ${e.message}`)),
     page.click('input[type="submit"], button[type="submit"], #loginButton, .login-btn, button:has-text("Sign in"), input[value="Sign in"]'),
   ]);
+  logger.info('login: post-submit settle wait');
   await page.waitForTimeout(3_000);
+
   const url = page.url();
+  logger.info(`login: post-submit url: ${url}`);
   const bodyText = await page.textContent('body').catch(() => '');
   const isLoggedIn = (!url.includes('Login') && !url.includes('login')) || bodyText.includes('MY SERVICES') || bodyText.includes('My Permits') || bodyText.includes('Sign Out');
   if (!isLoggedIn) {
@@ -87,7 +105,6 @@ async function extractConfirmationRows(inspPage, confirmationLinks, count) {
     try {
       const tr = link.locator('xpath=ancestor::tr').first();
       const cells = await tr.locator('td').allInnerTexts();
-      // Columns observed on portal: [Confirmation #, Scheduled Date, Scheduled Inspection, Inspector Will Call, Comments, Not Printed]
       scheduledDate = (cells[1] || '').trim();
       scheduledInspection = (cells[2] || '').trim();
     } catch (_) {}
@@ -167,7 +184,6 @@ async function navigateToInspections(page, permitNumber, options = {}) {
     return { status: 'no_existing_inspections', inspPage, permitNumber };
   }
 
-  // Resolve which row to click.
   let targetIdx = -1;
   if (confirmationNumber) {
     const wanted = String(confirmationNumber).trim();
