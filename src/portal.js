@@ -264,7 +264,7 @@ async function getAvailableDates(page) {
     .filter(Boolean)
     .sort((a, b) => a.date.getTime() - b.date.getTime());
 
-  logger.info(`Found ${dates.length} available dates`);
+  logger.info(`Found ${dates.length} available dates: ${dates.map(d => `${d.text} (${d.date.toISOString().slice(0,10)})`).join(', ')}`);
   return dates;
 }
 
