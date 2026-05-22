@@ -222,6 +222,22 @@ async function processInspection(page, inspection) {
   });
 
   if (eligibleDates.length === 0) {
+    // NEW: compute dates that would have been eligible if not for the notice window.
+    // These are "manually bookable" — the team can call the city to book them by hand.
+    const manuallyBookableDates = availableDates
+      .filter((d) => {
+        const isEarlier = d.date.getTime() < currentDateObj.getTime();
+        const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
+        const isInsideNoticeWindow = d.date.getTime() < earliestAllowed.getTime();
+        const isInFuture = d.date.getTime() > today.getTime();
+        return isEarlier && isOnOrAfterPreferred && isInsideNoticeWindow && isInFuture;
+      })
+      .map((d) => d.text);
+
+    if (manuallyBookableDates.length > 0) {
+      logger.info(`Manually-bookable dates (inside ${noticeHours}h notice): ${manuallyBookableDates.join(', ')}`);
+    }
+
     return {
       inspectionId: id,
       permitNumber,
@@ -229,6 +245,7 @@ async function processInspection(page, inspection) {
       oldDate: currentScheduledDate,
       desiredDate: desiredDate || null,
       availableDates: availableDates.map((d) => d.text),
+      manuallyBookableDates,
     };
   }
 
@@ -306,8 +323,6 @@ async function processOverrideReschedule(inspPage, inspection, availableDates, n
   };
 }
 
-// Helper to create a fresh page, used both for initial setup and for recovery
-// after ANY error during inspection processing.
 async function freshPage(oldPage) {
   if (oldPage) {
     try { await oldPage.context().close(); } catch (_) {}
@@ -376,18 +391,12 @@ async function mainLoop() {
             attempt++;
             const delay = backoffDelay(attempt);
             logger.error(`Error processing inspection ${inspection.id} (attempt ${attempt}/${config.timing.maxRetries}): ${err.message}`);
-
-            // CRITICAL: recreate the page on ANY error before retrying.
-            // A previous Playwright failure can leave the Page/CDP channel in a state
-            // where subsequent operations hang indefinitely without honoring timeouts.
-            // This is the root cause of the May 20 silent hang.
             logger.info('Recreating page after error before retry');
             try {
               page = await freshPage(page);
             } catch (recreateErr) {
               logger.error(`freshPage failed: ${recreateErr.message}`);
             }
-
             if (attempt < config.timing.maxRetries) await sleep(delay);
           }
         }
@@ -409,7 +418,6 @@ async function mainLoop() {
       if (page) { try { await page.context().close(); } catch (_) {} }
     }
 
-    // Watchdog poke — ONLY here, after a real cycle completes.
     if (typeof global.notifyCycleCompleted === 'function') global.notifyCycleCompleted();
 
     const settings = await fetchAutomationSettings();
