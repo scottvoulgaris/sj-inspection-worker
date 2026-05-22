@@ -48,8 +48,6 @@ function normalizeNoticeHours(value) {
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_NOTICE_HOURS;
 }
 
-// A full date D is allowed iff midnight(D) is >= (now + noticeHours).
-// In practice: take now + noticeHours, round up to next day boundary.
 function getEarliestAllowedDate(noticeHours) {
   const hours = normalizeNoticeHours(noticeHours);
   const now = new Date();
@@ -100,8 +98,7 @@ async function processInspection(page, inspection) {
   logger.info(`Processing inspection ${id} for permit ${permitNumber} (${projectName} — ${inspectionType})`);
   logger.info(`  Current: ${currentScheduledDate}, Desired: ${desiredDate || 'none'}, Override: ${overrideDate || 'none'}, Notice: ${noticeHours}h, Confirmation: ${confirmationNumber || 'auto'}`);
 
-  // Defensive past-due skip. The control app should already filter these via auto-lock,
-  // but if we see one slip through we refuse to touch it.
+  // Defensive past-due skip.
   const currentDateObj = parseFlexibleDate(currentScheduledDate);
   const today = todayLocalMidnight();
   if (currentDateObj && currentDateObj.getTime() <= today.getTime()) {
@@ -176,7 +173,6 @@ async function processInspection(page, inspection) {
   const earliestAllowed = getEarliestAllowedDate(noticeHours);
   logger.info(`Earliest allowed (${noticeHours}h notice): ${earliestAllowed.toISOString()}`);
 
-  // Scheduled-too-soon correction path.
   if (preferredDateObj && currentDateObj.getTime() < preferredDateObj.getTime()) {
     const correctionDates = availableDates.filter(
       (d) => d.date.getTime() >= preferredDateObj.getTime() && d.date.getTime() >= earliestAllowed.getTime()
@@ -218,7 +214,6 @@ async function processInspection(page, inspection) {
     };
   }
 
-  // Standard earlier-date path.
   const eligibleDates = availableDates.filter((d) => {
     const isEarlier = d.date.getTime() < currentDateObj.getTime();
     const isOnOrAfterPreferred = !preferredDateObj || d.date.getTime() >= preferredDateObj.getTime();
@@ -311,6 +306,17 @@ async function processOverrideReschedule(inspPage, inspection, availableDates, n
   };
 }
 
+// Helper to create a fresh page, used both for initial setup and for recovery
+// after ANY error during inspection processing.
+async function freshPage(oldPage) {
+  if (oldPage) {
+    try { await oldPage.context().close(); } catch (_) {}
+  }
+  const newP = await newPage();
+  await login(newP);
+  return newP;
+}
+
 async function mainLoop() {
   logger.info('=== Automation worker starting ===');
   logger.info(`DRY_RUN env raw value: "${process.env.DRY_RUN}" → dryRun=${config.dryRun}`);
@@ -337,6 +343,7 @@ async function mainLoop() {
       const inspections = await fetchPrioritizedInspections();
       if (!inspections || inspections.length === 0) {
         consecutiveFailures = 0;
+        if (typeof global.notifyCycleCompleted === 'function') global.notifyCycleCompleted();
         await sleep(config.timing.cyclePauseMs);
         continue;
       }
@@ -349,7 +356,10 @@ async function mainLoop() {
         let processed = false;
         while (attempt < config.timing.maxRetries && !processed) {
           try {
-            if (isSessionExpired(page)) await login(page);
+            if (isSessionExpired(page)) {
+              logger.info('Session expired; refreshing page');
+              page = await freshPage(page);
+            }
             const result = await processInspection(page, inspection);
             await postAutomationResult(result);
             processed = true;
@@ -365,13 +375,19 @@ async function mainLoop() {
             }
             attempt++;
             const delay = backoffDelay(attempt);
-            logger.error(`Error processing inspection ${inspection.id} (attempt ${attempt}/${config.timing.maxRetries})`, err.message);
-            await takeScreenshot(page, `error-${inspection.id}-attempt${attempt}`);
-            if (err.message.includes('Login failed') || err.message.includes('session')) {
-              try { await page.context().close(); } catch (_) {}
-              page = await newPage();
-              await login(page);
+            logger.error(`Error processing inspection ${inspection.id} (attempt ${attempt}/${config.timing.maxRetries}): ${err.message}`);
+
+            // CRITICAL: recreate the page on ANY error before retrying.
+            // A previous Playwright failure can leave the Page/CDP channel in a state
+            // where subsequent operations hang indefinitely without honoring timeouts.
+            // This is the root cause of the May 20 silent hang.
+            logger.info('Recreating page after error before retry');
+            try {
+              page = await freshPage(page);
+            } catch (recreateErr) {
+              logger.error(`freshPage failed: ${recreateErr.message}`);
             }
+
             if (attempt < config.timing.maxRetries) await sleep(delay);
           }
         }
@@ -386,13 +402,15 @@ async function mainLoop() {
     } catch (err) {
       consecutiveFailures++;
       const delay = backoffDelay(consecutiveFailures);
-      logger.error(`Cycle ${cycleCount} failed`, err.message);
-      if (page) await takeScreenshot(page, `cycle-error-${cycleCount}`);
+      logger.error(`Cycle ${cycleCount} failed: ${err.message}`);
       await sleep(delay);
       continue;
     } finally {
       if (page) { try { await page.context().close(); } catch (_) {} }
     }
+
+    // Watchdog poke — ONLY here, after a real cycle completes.
+    if (typeof global.notifyCycleCompleted === 'function') global.notifyCycleCompleted();
 
     const settings = await fetchAutomationSettings();
     if (settings && settings.paused === true) {
