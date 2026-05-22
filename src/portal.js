@@ -41,10 +41,10 @@ async function takeScreenshot(page, label) {
   fs.mkdirSync(config.screenshotDir, { recursive: true });
   const filePath = path.resolve(screenshotPath(label));
   try {
-    await page.screenshot({ path: filePath, fullPage: true });
+    await page.screenshot({ path: filePath, fullPage: true, timeout: 15_000 });
     return filePath;
   } catch (err) {
-    logger.warn(`Screenshot failed (${label})`, err.message);
+    logger.warn(`Screenshot failed (${label}): ${err.message}`);
     return null;
   }
 }
@@ -155,7 +155,7 @@ async function navigateToInspections(page, permitNumber, options = {}) {
     if (linkText.replace(/\s+/g, ' ') === permitNormalized) {
       await Promise.all([
         inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
-        fileNumberLinks.nth(i).click(),
+        fileNumberLinks.nth(i).click({ timeout: 15_000 }),
       ]);
       matched = true;
       break;
@@ -168,7 +168,6 @@ async function navigateToInspections(page, permitNumber, options = {}) {
 
   await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
   await inspPage.waitForTimeout(2_000);
-  await takeScreenshot(inspPage, `scheduling-page-${permitNumber}`);
 
   const schedulingBody = await inspPage.textContent('body').catch(() => '');
   const cannotSchedule =
@@ -208,11 +207,10 @@ async function navigateToInspections(page, permitNumber, options = {}) {
   logger.info(`Clicking confirmation ${confText} (idx ${targetIdx})`);
   await Promise.all([
     inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
-    confirmationLinks.nth(targetIdx).click(),
+    confirmationLinks.nth(targetIdx).click({ timeout: 15_000 }),
   ]);
   await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
   await inspPage.waitForTimeout(2_000);
-  await takeScreenshot(inspPage, `modify-page-${permitNumber}`);
 
   return { status: 'ok', inspPage, permitNumber, confirmationNumber: confText };
 }
@@ -275,7 +273,6 @@ async function rescheduleInspection(page, targetDate) {
 
   await dateSelect.selectOption(targetDate.raw);
   await page.waitForTimeout(1_000);
-  await takeScreenshot(page, 'pre-resubmit');
 
   const resubmitBtn = page.locator('input[value*="Resubmit"], button:has-text("Resubmit")').first();
   if ((await resubmitBtn.count()) === 0) {
@@ -285,7 +282,7 @@ async function rescheduleInspection(page, targetDate) {
 
   await Promise.all([
     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
-    resubmitBtn.click(),
+    resubmitBtn.click({ timeout: 15_000 }),
   ]);
   await page.waitForLoadState('domcontentloaded').catch(() => null);
   await page.waitForTimeout(2_000);
