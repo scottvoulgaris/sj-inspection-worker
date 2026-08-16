@@ -438,19 +438,15 @@ async function getAvailableDates(page) {
     return toLocalMidnight(fullYear, parseInt(m[1], 10) - 1, parseInt(m[2], 10));
   };
   const parseOptionDate = (text, value) => {
-    const currentYear = new Date().getFullYear();
-    let mdy = tryParseMDY(text) || tryParseMDY(value);
+    // In practice the option value carries the full date ("08/17/2026") while
+    // the label omits the year ("Monday, August 17"), so this path decides.
+    const mdy = tryParseMDY(text) || tryParseMDY(value);
     if (mdy) return mdy;
     const iso = (text || '').match(/^(\d{4})-(\d{2})-(\d{2})/) || (value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (iso) return toLocalMidnight(parseInt(iso[1], 10), parseInt(iso[2], 10) - 1, parseInt(iso[3], 10));
-    let parsed = new Date(text);
-    if (isNaN(parsed.getTime())) parsed = new Date(`${text}, ${currentYear}`);
-    if (isNaN(parsed.getTime())) parsed = new Date(`${text} ${currentYear}`);
-    if (isNaN(parsed.getTime())) parsed = new Date(value);
-    if (isNaN(parsed.getTime())) parsed = new Date(`${value}, ${currentYear}`);
-    if (isNaN(parsed.getTime())) return null;
-    const yr = parsed.getFullYear() < 2020 ? currentYear : parsed.getFullYear();
-    return toLocalMidnight(yr, parsed.getMonth(), parsed.getDate());
+    // Fallback for a yearless label — defer to the shared parser so the year is
+    // inferred as nearest-to-today rather than assumed to be the current one.
+    return parseFlexibleDate(text) || parseFlexibleDate(value);
   };
 
   const dates = options
