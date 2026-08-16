@@ -16,6 +16,7 @@ const {
   sendHeartbeat,
   fetchAutomationSettings,
 } = require('./api');
+const notify = require('./notify');
 
 const DEFAULT_NOTICE_HOURS = 24;
 
@@ -343,6 +344,7 @@ async function mainLoop() {
   }
   logger.info(`Control API: ${config.controlApp.url}`);
   logger.info(`Portal: ${config.portal.loginUrl}`);
+  logger.info(`Teams alerts: ${notify.isConfigured() ? 'enabled' : 'disabled (TEAMS_WEBHOOK_URL not set)'}`);
 
   let consecutiveFailures = 0;
   let cycleCount = 0;
@@ -377,14 +379,17 @@ async function mainLoop() {
             }
             const result = await processInspection(page, inspection);
             await postAutomationResult(result);
+            await notify.notifyForResult({ ...result, projectName: inspection.projectName });
             processed = true;
             await jitter();
           } catch (err) {
             if (err instanceof PermitNotFoundError) {
-              await postAutomationResult({
+              const notFound = {
                 inspectionId: inspection.id, permitNumber: inspection.permitNumber,
                 status: 'permit_not_found', error: err.message,
-              });
+              };
+              await postAutomationResult(notFound);
+              await notify.notifyForResult({ ...notFound, projectName: inspection.projectName });
               processed = true;
               break;
             }
@@ -401,17 +406,21 @@ async function mainLoop() {
           }
         }
         if (!processed) {
-          await postAutomationResult({
+          const failure = {
             inspectionId: inspection.id, permitNumber: inspection.permitNumber,
             status: 'failed', error: 'Max retries exhausted',
-          });
+          };
+          await postAutomationResult(failure);
+          await notify.inspectionFailed(inspection, 'Max retries exhausted');
         }
       }
       consecutiveFailures = 0;
+      notify.cycleRecovered();
     } catch (err) {
       consecutiveFailures++;
       const delay = backoffDelay(consecutiveFailures);
       logger.error(`Cycle ${cycleCount} failed: ${err.message}`);
+      await notify.cycleFailed(cycleCount, err.message, consecutiveFailures);
       await sleep(delay);
       continue;
     } finally {

@@ -2,3 +2,4 @@ node_modules/
 screenshots/
 *.log
 .env
+alert-state.json

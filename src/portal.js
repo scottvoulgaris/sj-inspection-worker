@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
+const notify = require('./notify');
 
 fs.mkdirSync(config.screenshotDir, { recursive: true });
 
@@ -56,6 +57,7 @@ async function login(page) {
     logger.info(`login: goto returned. current url: ${page.url()}`);
   } catch (err) {
     logger.error(`login: goto FAILED — ${err.name}: ${err.message}`);
+    await notify.loginFailed(`Could not load login page — ${err.name}: ${err.message}`, config.portal.loginUrl);
     throw err;
   }
 
@@ -67,6 +69,7 @@ async function login(page) {
   } catch (err) {
     await takeScreenshot(page, 'login-form-not-found');
     logger.error(`login: username field not found — ${err.message}`);
+    await notify.loginFailed('Login form not found — the portal login page may have changed', config.portal.loginUrl);
     throw new Error('Login form not found');
   }
 
@@ -89,9 +92,11 @@ async function login(page) {
   const isLoggedIn = (!url.includes('Login') && !url.includes('login')) || bodyText.includes('MY SERVICES') || bodyText.includes('My Permits') || bodyText.includes('Sign Out');
   if (!isLoggedIn) {
     await takeScreenshot(page, 'login-failed');
+    await notify.loginFailed(`Credentials rejected or unexpected landing page (${url})`, config.portal.loginUrl);
     throw new Error('Login failed');
   }
   logger.info('Login successful');
+  notify.loginRecovered();
   return true;
 }
 
@@ -111,6 +116,101 @@ async function extractConfirmationRows(inspPage, confirmationLinks, count) {
     rows.push({ confirmationNumber: number, scheduledDate, scheduledInspection });
   }
   return rows;
+}
+
+const QUERY_PAGE_MARKER = 'Permit/reference number Query';
+const PERMIT_LIST_MARKER = 'Permits Under Inspection';
+const SCHEDULING_PAGE_MARKER = 'Scheduling or Changing Inspection Requests';
+
+/**
+ * The permit/reference search expects the bare numeric permit id — 4-digit year
+ * plus 6-digit sequence, e.g. 2004113745 — while the control app and the
+ * portal's own display carry separators and a type suffix ("2026-107657-RS",
+ * "2026 107657 000 00 RS"). Produce the most likely search terms in priority
+ * order so a format mismatch costs a retry instead of a failed inspection.
+ */
+function permitSearchCandidates(permitNumber) {
+  const raw = String(permitNumber || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  const candidates = [];
+  if (digits.length >= 10) candidates.push(digits.slice(0, 10));
+  if (digits.length > 0) candidates.push(digits);
+  if (raw) candidates.push(raw);
+  return [...new Set(candidates)];
+}
+
+async function submitPermitSearch(inspPage, term) {
+  const input = inspPage.locator('input[type="text"], input:not([type])').first();
+  if ((await input.count()) === 0) {
+    await takeScreenshot(inspPage, 'permit-search-input-not-found');
+    throw new Error('Permit/reference number search box not found');
+  }
+  await input.fill(term);
+
+  const searchBtn = inspPage
+    .locator('input[type="submit"], input[value*="Search" i], button:has-text("Search")')
+    .first();
+  if ((await searchBtn.count()) === 0) {
+    await takeScreenshot(inspPage, 'permit-search-button-not-found');
+    throw new Error('Permit/reference number Search button not found');
+  }
+
+  await Promise.all([
+    inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
+    searchBtn.click({ timeout: 15_000 }),
+  ]);
+  await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
+  await inspPage.waitForTimeout(2_000);
+}
+
+/** Search the permit directly. Returns true once we land on the scheduling page. */
+async function searchForPermit(inspPage, permitNumber) {
+  const queryUrl = inspPage.url();
+  const candidates = permitSearchCandidates(permitNumber);
+  logger.info(`Permit search candidates for "${permitNumber}": ${candidates.join(', ')}`);
+
+  for (let i = 0; i < candidates.length; i++) {
+    const term = candidates[i];
+    logger.info(`Searching permit/reference number "${term}"`);
+    await submitPermitSearch(inspPage, term);
+
+    const text = await inspPage.textContent('body').catch(() => '');
+    if (text.includes(SCHEDULING_PAGE_MARKER)) {
+      logger.info(`Permit ${permitNumber} resolved with search term "${term}"`);
+      return true;
+    }
+
+    logger.warn(`Search term "${term}" did not reach the scheduling page`);
+    if (i < candidates.length - 1) {
+      await inspPage.goto(queryUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null);
+      await inspPage.waitForTimeout(1_000);
+    }
+  }
+  return false;
+}
+
+/**
+ * Legacy path: accounts that own the permits get a list of file-number links
+ * instead of the search box. Kept so the worker still works if the portal
+ * serves the list page (e.g. after properties are added to the account).
+ */
+async function selectPermitFromList(inspPage, permitNumber) {
+  const fileNumberLinks = inspPage.locator('table a').filter({ hasText: /\d{4}/ });
+  const linkCount = await fileNumberLinks.count();
+  const permitNormalized = permitNumber.replace(/-/g, ' ');
+
+  for (let i = 0; i < linkCount; i++) {
+    const linkText = (await fileNumberLinks.nth(i).innerText()).trim();
+    if (linkText.replace(/\s+/g, ' ') === permitNormalized) {
+      await Promise.all([
+        inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
+        fileNumberLinks.nth(i).click({ timeout: 15_000 }),
+      ]);
+      return;
+    }
+  }
+  await takeScreenshot(inspPage, `permit-not-found-${permitNumber}`);
+  throw new PermitNotFoundError(`Permit ${permitNumber} not found in permit list`);
 }
 
 async function navigateToInspections(page, permitNumber, options = {}) {
@@ -140,30 +240,23 @@ async function navigateToInspections(page, permitNumber, options = {}) {
   }
 
   const bodyCheck = await inspPage.textContent('body').catch(() => '');
-  if (!bodyCheck.includes('Permits Under Inspection') && !bodyCheck.includes('Permit/reference number Query')) {
+  const onQueryPage = bodyCheck.includes(QUERY_PAGE_MARKER);
+  const onPermitList = bodyCheck.includes(PERMIT_LIST_MARKER);
+  if (!onQueryPage && !onPermitList) {
     await takeScreenshot(inspPage, 'wrong-page-after-manage');
     throw new Error('Did not land on Manage Inspections page');
   }
 
-  const fileNumberLinks = inspPage.locator('table a').filter({ hasText: /\d{4}/ });
-  const linkCount = await fileNumberLinks.count();
-  const permitNormalized = permitNumber.replace(/-/g, ' ');
-
-  let matched = false;
-  for (let i = 0; i < linkCount; i++) {
-    const linkText = (await fileNumberLinks.nth(i).innerText()).trim();
-    if (linkText.replace(/\s+/g, ' ') === permitNormalized) {
-      await Promise.all([
-        inspPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => null),
-        fileNumberLinks.nth(i).click({ timeout: 15_000 }),
-      ]);
-      matched = true;
-      break;
+  if (onQueryPage) {
+    logger.info('Landed on permit/reference query page — searching permit directly');
+    const found = await searchForPermit(inspPage, permitNumber);
+    if (!found) {
+      await takeScreenshot(inspPage, `permit-not-found-${permitNumber}`);
+      throw new PermitNotFoundError(`Permit ${permitNumber} not found via permit/reference search`);
     }
-  }
-  if (!matched) {
-    await takeScreenshot(inspPage, `permit-not-found-${permitNumber}`);
-    throw new PermitNotFoundError(`Permit ${permitNumber} not found`);
+  } else {
+    logger.info('Landed on permit list page — selecting permit from list');
+    await selectPermitFromList(inspPage, permitNumber);
   }
 
   await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
@@ -305,6 +398,7 @@ function isSessionExpired(page) {
 module.exports = {
   login,
   navigateToInspections,
+  permitSearchCandidates,
   getAvailableDates,
   rescheduleInspection,
   isSessionExpired,

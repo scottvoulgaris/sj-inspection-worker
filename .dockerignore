@@ -9,5 +9,6 @@ replit.md
 .upm
 screenshots
 attached_assets
+alert-state.json
 *.md
 Modify screenshot saving logic:*

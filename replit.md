@@ -23,7 +23,9 @@ A continuous Node.js background worker using Playwright to automate inspection r
 
 ### Key Functions
 - `login(page)` — Authenticates with the San José portal via portal.sanjoseca.gov
-- `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), finds matching file number hyperlink, clicks it, then clicks the confirmation number link to reach the Modify Inspection Request page. Returns `{ inspPage, permitNumber, confirmationNumber }`.
+- `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), then either searches the permit directly on the Permit/reference number Query page or picks it out of the legacy permit list, then clicks the confirmation number link to reach the Modify Inspection Request page. Returns `{ inspPage, permitNumber, confirmationNumber }`.
+- `permitSearchCandidates(permitNumber)` — Derives portal search terms from any permit format (see "Permit number formats").
+- `searchForPermit(inspPage, permitNumber)` — Fills the Permit/reference number box and submits, retrying each candidate format until the scheduling page is reached.
 - `getAvailableDates(page)` — Smart-detects date dropdown by scanning all `<select>` elements for date-like options (day/month names or numeric dates). Uses `parseOptionDate` helper for robust parsing including MM/DD/YYYY format. Extracts and sorts available dates.
 - `rescheduleInspection(page, targetDate)` — Selects the new date in the Inspection Date dropdown and clicks "Resubmit Request" on the Modify page.
 - `cleanupOldScreenshots()` — Automatically deletes oldest screenshots when count exceeds MAX_SCREENSHOTS (default 50). Called before every new screenshot.
@@ -46,11 +48,34 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - Worker checks if `targetDate` is available in the portal dropdown, reports `target_date_unavailable` if not
 
 ### Portal Navigation Flow
-1. Login at portal.sanjoseca.gov
+1. Login at the SJPermits login page (email + password → "Sign in") → lands on **MY SERVICES**
 2. Click "Manage Inspections (Bldg & Fire)" button → opens popup window
-3. In popup: find file number hyperlink matching permit (e.g. "2026 103016 RS" matches "2026-103016-RS")
-4. Click file number → lands on "Scheduling or Changing Inspection Requests" page
+3. The worker then branches on which page it lands on:
+   - **"Permit/reference number Query"** (current behaviour — the automation account owns no
+     applications, so there is no permit list): type the permit into the search box and click
+     Search. See "Permit number formats" below.
+   - **"Permits Under Inspection"** (legacy): find the file-number hyperlink matching the permit
+     (e.g. "2026 103016 RS" matches "2026-103016-RS") and click it.
+4. Either branch lands on the "Scheduling or Changing Inspection Requests" page
 5. Click confirmation number link → lands on "Modify Inspection Request For Combination" page
+
+### Permit number formats
+The permit/reference search expects the **bare 10-digit permit id** — 4-digit year + 6-digit
+sequence (the portal's own example is `2004113745`). The same permit is displayed elsewhere with
+separators and a type suffix:
+
+| Where | Looks like |
+|---|---|
+| Control app (`permitNumber`) | `2026 123456 RS` |
+| Portal search box | `2026123456` |
+| Portal permit header | `2026 123456 000 00 RS` |
+
+Dash-separated (`2026-123456-RS`), lowercase suffixes, and stray whitespace all normalize to the
+same search term, so the control app does not have to be strict about formatting.
+
+`permitSearchCandidates()` derives search terms in priority order — digits-only truncated to 10,
+then all digits, then the raw string — and `searchForPermit()` tries each until one reaches the
+scheduling page. A format mismatch therefore costs a retry rather than failing the inspection.
 6. Extract available dates from "Inspection Date" dropdown
 7. Filter dates: must be earlier than current AND on/after preferred date
 8. If eligible date found (or override target specified) and not in dry-run mode, select new date and click "Resubmit Request"
@@ -75,9 +100,14 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `CONTROL_APP_URL` — Base URL of the control application API
 
 ## Optional Environment Variables
+- `TEAMS_WEBHOOK_URL` — Power Automate Workflows webhook URL for error alerts. Unset = alerts disabled (worker logs and continues normally).
+- `TEAMS_ALERT_REPEAT_HOURS` — Hours before an still-active condition may re-post (default: `0` = never re-post until it clears)
+- `TEAMS_ALERT_STATE_FILE` — Where dedup state is persisted (default: `./alert-state.json`)
 - `DRY_RUN` — Set to `false` to enable live rescheduling (default: true/dry run mode)
 - `MAX_INSPECTIONS_PER_CYCLE` — Max inspections to process per cycle (default: 3)
 - `MAX_SCREENSHOTS` — Maximum number of screenshots to keep before auto-cleanup (default: 50)
+- `PORTAL_LOGIN_URL` — Override the login URL (default: `https://portal.sanjoseca.gov/deployed/sfjsp?interviewID=Login`)
+- `PORTAL_BASE_URL` — Override the portal base URL (default: `https://portal.sanjoseca.gov`)
 - `CHROMIUM_PATH` — Path to Chromium binary (auto-configured)
 - `DEBUG` — Set to `true` to enable debug logging
 
@@ -135,6 +165,31 @@ fly secrets list            # List set secrets
 - Region `sjc` (San José) is closest to the portal server for lowest latency
 - `auto_stop_machines = "off"` ensures the worker runs 24/7
 - `min_machines_running = 1` guarantees at least one machine is always up
+
+## Teams Error Notifications (`src/notify.js`)
+
+Posts Adaptive Cards to a Microsoft Teams channel when the worker hits a problem.
+
+### Delivery
+Uses a **Power Automate Workflows** webhook (the legacy O365 connector webhooks are retired). In Teams: channel → ⋯ → Workflows → "Post to a channel when a webhook request is received" → copy the generated URL → `fly secrets set TEAMS_WEBHOOK_URL="..."`.
+
+### First-occurrence-only semantics
+An alert fires the **first** time a condition appears, then stays silent while that same condition repeats cycle after cycle. It re-arms only when the condition clears, so a recovery followed by a new failure alerts again. Dedup state is persisted to `alert-state.json` so a watchdog restart, Fly redeploy, or crash loop does not re-announce conditions already reported.
+
+### Alert catalog
+
+| Condition | Dedup key | Severity | Re-armed by |
+|---|---|---|---|
+| Login page unreachable / form missing / credentials rejected | `login_failed` | error | a successful login |
+| Cycle threw before completing | `cycle_error` | error | a cycle completing |
+| Inspection exhausted max retries | `failed:<inspectionId>` | error | that inspection processing cleanly |
+| Permit not found on Manage Inspections page | `permit_not_found:<permit>` | warning | that permit processing cleanly |
+| Requested confirmation number not listed | `confirmation_not_found:<permit>:<requested>` | warning | that permit processing cleanly |
+| Permit has multiple confirmations, selection required | `multiple_confirmations:<permit>` | warning | that permit processing cleanly |
+
+Normal outcomes (`rescheduled`, `dry_run`, `no_earlier_date`, `no_dates_available`, …) are **not** posted to Teams — they go to the control app only.
+
+Notification failures are swallowed and logged; they never break the automation loop. `alert()` is a no-op when `TEAMS_WEBHOOK_URL` is unset.
 
 ## Dependencies
 - playwright (browser automation)

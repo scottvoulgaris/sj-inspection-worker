@@ -2,8 +2,8 @@ const config = {
   portal: {
     username: process.env.PORTAL_USERNAME,
     password: process.env.PORTAL_PASSWORD,
-    loginUrl: 'https://portal.sanjoseca.gov/deployed/sfjsp?interviewID=Login',
-    baseUrl: 'https://portal.sanjoseca.gov',
+    loginUrl: process.env.PORTAL_LOGIN_URL || 'https://portal.sanjoseca.gov/deployed/sfjsp?interviewID=Login',
+    baseUrl: process.env.PORTAL_BASE_URL || 'https://portal.sanjoseca.gov',
   },
   controlApp: {
     url: (process.env.CONTROL_APP_URL || '').replace(/\/$/, ''),
