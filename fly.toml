@@ -6,6 +6,11 @@ primary_region = "sjc"
 [env]
   NODE_ENV = "production"
   PORT = "3000"
+  # Every date decision in the worker uses local midnight, and the portal runs
+  # on Pacific time. Without this the container runs UTC and the day boundary
+  # sits 7-8 hours early, making the notice window a day over-conservative
+  # every evening and mis-flagging next-day inspections as past-due.
+  TZ = "America/Los_Angeles"
 
 [http_service]
   internal_port = 3000

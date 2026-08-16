@@ -322,6 +322,14 @@ async function mainLoop() {
   logger.info(`Control API: ${config.controlApp.url}`);
   logger.info(`Portal: ${config.portal.loginUrl}`);
   logger.info(`Teams alerts: ${notify.isConfigured() ? 'enabled' : 'disabled (TEAMS_WEBHOOK_URL not set)'}`);
+  // Print the timezone actually in effect: if tzdata is missing from the image,
+  // TZ silently falls back to UTC and every date decision shifts a day.
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const offsetHours = -new Date().getTimezoneOffset() / 60;
+  logger.info(`Timezone: ${tz} (UTC${offsetHours >= 0 ? '+' : ''}${offsetHours}) — local now ${new Date().toString()}`);
+  if (!/Los_Angeles|Pacific/.test(tz)) {
+    logger.warn(`Timezone is ${tz}, not Pacific — date filtering will be off by a day near the boundary. Set TZ=America/Los_Angeles.`);
+  }
 
   let consecutiveFailures = 0;
   let cycleCount = 0;

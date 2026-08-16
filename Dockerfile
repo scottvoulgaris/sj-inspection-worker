@@ -3,6 +3,7 @@ FROM node:20-slim
 RUN apt-get update && apt-get install -y \
     wget \
     ca-certificates \
+    tzdata \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
