@@ -3,6 +3,7 @@ const fs = require('fs');
 const config = require('./config');
 const logger = require('./logger');
 const notify = require('./notify');
+const { parseFlexibleDate } = require('./dates');
 
 fs.mkdirSync(config.screenshotDir, { recursive: true });
 
@@ -108,7 +109,11 @@ async function extractConfirmationRows(inspPage, confirmationLinks, count) {
     let scheduledDate = '';
     let scheduledInspection = '';
     try {
-      const tr = link.locator('xpath=ancestor::tr').first();
+      // ancestor::tr[1] is the NEAREST enclosing row. Plain `ancestor::tr`
+      // with .first() picks the outermost one, which on this nested-table
+      // layout is the row wrapping the whole page — every cell then comes
+      // back as the entire document.
+      const tr = link.locator('xpath=ancestor::tr[1]');
       const cells = await tr.locator('td').allInnerTexts();
       scheduledDate = (cells[1] || '').trim();
       scheduledInspection = (cells[2] || '').trim();
@@ -121,6 +126,41 @@ async function extractConfirmationRows(inspPage, confirmationLinks, count) {
 const QUERY_PAGE_MARKER = 'Permit/reference number Query';
 const PERMIT_LIST_MARKER = 'Permits Under Inspection';
 const SCHEDULING_PAGE_MARKER = 'Scheduling or Changing Inspection Requests';
+
+/**
+ * Read the page's text with whitespace collapsed.
+ *
+ * These pages wrap headings across lines, so raw textContent can read
+ * "Permit/reference number\nQuery" — a substring match against the phrase
+ * fails unless whitespace is normalized first. Always match markers on this.
+ */
+async function pageText(page) {
+  const raw = await page.textContent('body').catch(() => null);
+  return (raw || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Wait until one of `markers` appears in the rendered text.
+ *
+ * These pages routinely fire domcontentloaded before their content exists —
+ * the Manage Inspections popup in particular — so waiting on the text we
+ * actually need is far more reliable than sleeping a fixed interval.
+ * Resolves either way; callers still verify what they got.
+ */
+async function waitForAnyMarker(page, markers, timeout = 30_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    try {
+      const text = await pageText(page);
+      if (markers.some((m) => text.includes(m))) return true;
+    } catch (_) {
+      // Execution context destroyed mid-navigation (the popup opens on
+      // about:blank and then navigates) — just poll again.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
 
 /**
  * The permit/reference search expects the bare numeric permit id — 4-digit year
@@ -140,7 +180,11 @@ function permitSearchCandidates(permitNumber) {
 }
 
 async function submitPermitSearch(inspPage, term) {
-  const input = inspPage.locator('input[type="text"], input:not([type])').first();
+  // The query form's field is name="permitnum"; the generic fallbacks cover a
+  // future rename without needing a redeploy to diagnose.
+  const input = inspPage
+    .locator('input[name="permitnum"], input[type="text"], input:not([type])')
+    .first();
   if ((await input.count()) === 0) {
     await takeScreenshot(inspPage, 'permit-search-input-not-found');
     throw new Error('Permit/reference number search box not found');
@@ -148,7 +192,7 @@ async function submitPermitSearch(inspPage, term) {
   await input.fill(term);
 
   const searchBtn = inspPage
-    .locator('input[type="submit"], input[value*="Search" i], button:has-text("Search")')
+    .locator('input[type="submit"][value="Search"], input[type="submit"], input[value*="Search" i], button:has-text("Search")')
     .first();
   if ((await searchBtn.count()) === 0) {
     await takeScreenshot(inspPage, 'permit-search-button-not-found');
@@ -160,7 +204,7 @@ async function submitPermitSearch(inspPage, term) {
     searchBtn.click({ timeout: 15_000 }),
   ]);
   await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
-  await inspPage.waitForTimeout(2_000);
+  await waitForAnyMarker(inspPage, [SCHEDULING_PAGE_MARKER, QUERY_PAGE_MARKER]);
 }
 
 /** Search the permit directly. Returns true once we land on the scheduling page. */
@@ -174,7 +218,7 @@ async function searchForPermit(inspPage, permitNumber) {
     logger.info(`Searching permit/reference number "${term}"`);
     await submitPermitSearch(inspPage, term);
 
-    const text = await inspPage.textContent('body').catch(() => '');
+    const text = await pageText(inspPage);
     if (text.includes(SCHEDULING_PAGE_MARKER)) {
       logger.info(`Permit ${permitNumber} resolved with search term "${term}"`);
       return true;
@@ -213,8 +257,70 @@ async function selectPermitFromList(inspPage, permitNumber) {
   throw new PermitNotFoundError(`Permit ${permitNumber} not found in permit list`);
 }
 
+function normalizeType(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+/**
+ * Decide which scheduled inspection to modify when a permit has several.
+ *
+ * A permit routinely carries multiple confirmations of the SAME type (the
+ * example permit has three "Piers" rows on Sep 1/3/9), so inspection type
+ * alone is not enough to disambiguate. The date we are trying to move off of
+ * is — it uniquely identifies the row the control app is asking about.
+ *
+ * Returns { index, reason }; index -1 means "could not decide safely".
+ */
+function pickConfirmation(rows, { confirmationNumber, currentScheduledDate, inspectionType } = {}) {
+  if (confirmationNumber) {
+    const wanted = String(confirmationNumber).trim();
+    const index = rows.findIndex((r) => r.confirmationNumber === wanted);
+    return index === -1
+      ? { index: -1, reason: 'confirmation_not_found' }
+      : { index, reason: `explicit confirmation ${wanted}` };
+  }
+
+  if (rows.length === 1) return { index: 0, reason: 'only confirmation on the permit' };
+
+  let pool = rows.map((row, index) => ({ row, index }));
+  const applied = [];
+
+  // Narrow by inspection type, but only if it actually matches something —
+  // portal wording ("Piers") and control-app wording ("Foundation") may differ.
+  if (inspectionType) {
+    const want = normalizeType(inspectionType);
+    const byType = pool.filter(({ row }) => {
+      const got = normalizeType(row.scheduledInspection);
+      return got && (got === want || got.includes(want) || want.includes(got));
+    });
+    if (byType.length > 0) {
+      pool = byType;
+      applied.push(`type="${inspectionType}"`);
+    }
+  }
+
+  // Narrow by the currently-scheduled date. This is the decisive filter when
+  // several inspections share a type.
+  if (currentScheduledDate) {
+    const want = parseFlexibleDate(currentScheduledDate);
+    if (want) {
+      const byDate = pool.filter(({ row }) => {
+        const got = parseFlexibleDate(row.scheduledDate);
+        return got && got.getTime() === want.getTime();
+      });
+      if (byDate.length > 0) {
+        pool = byDate;
+        applied.push(`date="${currentScheduledDate}"`);
+      }
+    }
+  }
+
+  if (pool.length === 1) return { index: pool[0].index, reason: `matched on ${applied.join(' + ')}` };
+  return { index: -1, reason: 'ambiguous' };
+}
+
 async function navigateToInspections(page, permitNumber, options = {}) {
-  const { confirmationNumber } = options;
+  const { confirmationNumber, currentScheduledDate, inspectionType } = options;
   logger.info(`Navigating to inspections for permit ${permitNumber}${confirmationNumber ? ` (confirmation ${confirmationNumber})` : ''}`);
 
   const manageBtn = page.locator('button:has-text("Manage Inspections (Bldg & Fire)"), a:has-text("Manage Inspections (Bldg & Fire)"), input[value*="Manage Inspections"]');
@@ -228,22 +334,17 @@ async function navigateToInspections(page, permitNumber, options = {}) {
     manageBtn.first().click({ timeout: 15_000 }),
   ]);
 
-  let inspPage;
-  if (popup) {
-    await popup.waitForLoadState('domcontentloaded');
-    await popup.waitForTimeout(2_000);
-    inspPage = popup;
-  } else {
-    await page.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(2_000);
-    inspPage = page;
-  }
+  const inspPage = popup || page;
+  await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
+  await waitForAnyMarker(inspPage, [QUERY_PAGE_MARKER, PERMIT_LIST_MARKER]);
 
-  const bodyCheck = await inspPage.textContent('body').catch(() => '');
+  const bodyCheck = await pageText(inspPage);
   const onQueryPage = bodyCheck.includes(QUERY_PAGE_MARKER);
   const onPermitList = bodyCheck.includes(PERMIT_LIST_MARKER);
   if (!onQueryPage && !onPermitList) {
     await takeScreenshot(inspPage, 'wrong-page-after-manage');
+    logger.error(`Unexpected page at ${inspPage.url()}`);
+    logger.error(`Body text: ${bodyCheck.slice(0, 400)}`);
     throw new Error('Did not land on Manage Inspections page');
   }
 
@@ -262,7 +363,7 @@ async function navigateToInspections(page, permitNumber, options = {}) {
   await inspPage.waitForLoadState('domcontentloaded').catch(() => null);
   await inspPage.waitForTimeout(2_000);
 
-  const schedulingBody = await inspPage.textContent('body').catch(() => '');
+  const schedulingBody = await pageText(inspPage);
   const cannotSchedule =
     /you\s+cannot\s+schedule\s+an\s+Inspection/i.test(schedulingBody) ||
     /no\s+more\s+inspection\s+time\s+left/i.test(schedulingBody);
@@ -276,25 +377,27 @@ async function navigateToInspections(page, permitNumber, options = {}) {
     return { status: 'no_existing_inspections', inspPage, permitNumber };
   }
 
-  let targetIdx = -1;
-  if (confirmationNumber) {
-    const wanted = String(confirmationNumber).trim();
-    for (let i = 0; i < confCount; i++) {
-      const t = (await confirmationLinks.nth(i).innerText()).trim();
-      if (t === wanted) { targetIdx = i; break; }
-    }
-    if (targetIdx === -1) {
-      const confirmations = await extractConfirmationRows(inspPage, confirmationLinks, confCount);
-      await takeScreenshot(inspPage, `confirmation-not-found-${permitNumber}-${wanted}`);
-      return { status: 'confirmation_not_found', inspPage, permitNumber, confirmations };
-    }
-  } else if (confCount === 1) {
-    targetIdx = 0;
-  } else {
-    const confirmations = await extractConfirmationRows(inspPage, confirmationLinks, confCount);
+  const confirmations = await extractConfirmationRows(inspPage, confirmationLinks, confCount);
+  logger.info(
+    `Confirmations: ${confirmations.map((c) => `${c.confirmationNumber} [${c.scheduledDate}] ${c.scheduledInspection}`).join(' | ')}`
+  );
+
+  const { index: targetIdx, reason } = pickConfirmation(confirmations, {
+    confirmationNumber,
+    currentScheduledDate,
+    inspectionType,
+  });
+
+  if (reason === 'confirmation_not_found') {
+    await takeScreenshot(inspPage, `confirmation-not-found-${permitNumber}-${confirmationNumber}`);
+    return { status: 'confirmation_not_found', inspPage, permitNumber, confirmations };
+  }
+  if (targetIdx === -1) {
+    logger.warn(`Could not resolve which confirmation to modify (${reason})`);
     await takeScreenshot(inspPage, `multiple-confirmations-${permitNumber}`);
     return { status: 'multiple_confirmations', inspPage, permitNumber, confirmations };
   }
+  logger.info(`Selected confirmation ${confirmations[targetIdx].confirmationNumber} — ${reason}`);
 
   const confText = (await confirmationLinks.nth(targetIdx).innerText()).trim();
   logger.info(`Clicking confirmation ${confText} (idx ${targetIdx})`);
@@ -399,6 +502,7 @@ module.exports = {
   login,
   navigateToInspections,
   permitSearchCandidates,
+  pickConfirmation,
   getAvailableDates,
   rescheduleInspection,
   isSessionExpired,

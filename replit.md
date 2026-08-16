@@ -26,6 +26,39 @@ A continuous Node.js background worker using Playwright to automate inspection r
 - `navigateToInspections(page, permitNumber)` — Clicks "Manage Inspections (Bldg & Fire)" (opens popup window), then either searches the permit directly on the Permit/reference number Query page or picks it out of the legacy permit list, then clicks the confirmation number link to reach the Modify Inspection Request page. Returns `{ inspPage, permitNumber, confirmationNumber }`.
 - `permitSearchCandidates(permitNumber)` — Derives portal search terms from any permit format (see "Permit number formats").
 - `searchForPermit(inspPage, permitNumber)` — Fills the Permit/reference number box and submits, retrying each candidate format until the scheduling page is reached.
+- `pickConfirmation(rows, hints)` — Chooses which scheduled inspection to modify (see "Confirmation selection").
+- `pageText(page)` — Reads body text with whitespace collapsed. **Always match page markers against this**, never raw `textContent`: these pages wrap headings mid-phrase, so raw text reads `Permit/reference number\nQuery` and a substring match silently fails.
+- `waitForAnyMarker(page, markers)` — Polls until one of the marker phrases renders. Used instead of fixed sleeps because the Manage Inspections popup fires `domcontentloaded` on `about:blank` before navigating.
+
+### Confirmation selection
+A permit routinely has several scheduled inspections **of the same type** — the test permit carries
+three "Piers" rows (Sep 1 / 3 / 9). Inspection type alone therefore cannot identify which row to
+move; `currentScheduledDate` can, because it is the date the control app is asking to change.
+
+Priority order in `pickConfirmation()`:
+1. Explicit `confirmationNumber` — exact match, or status `confirmation_not_found`
+2. Only one confirmation on the permit — take it
+3. Narrow by `inspectionType`, but only if it matches something (portal wording like "Piers" may not
+   match control-app wording like "Foundation"; a non-matching type is ignored rather than fatal)
+4. Narrow by `currentScheduledDate` — the decisive filter
+5. Still more than one candidate → status `multiple_confirmations`, no guess
+
+The worker never guesses when it cannot identify the row uniquely.
+
+### Local testing — `scripts/probe-permit.js`
+Read-only probe that walks login → permit search → confirmation selection → date extraction and
+**stops before rescheduling**. It does not import `rescheduleInspection`, so no code path can modify
+a booking. It only fills the search box and clicks confirmation-number hyperlinks; it never touches
+"Schedule New Inspection", "Resubmit Request", or "Purchase Additional Inspection Time".
+
+```bash
+node scripts/probe-permit.js "2026 107657 RS"                              # shows all confirmations
+node scripts/probe-permit.js "2026 107657 RS" --current-date "Sep 03, 2026"  # full path
+node scripts/probe-permit.js "2026 107657 RS" --confirmation 2556247
+```
+
+Credentials come from a gitignored `.env` at the repo root (`PORTAL_USERNAME`, `PORTAL_PASSWORD`).
+Screenshots land in `./screenshots/probe-*.png`.
 - `getAvailableDates(page)` — Smart-detects date dropdown by scanning all `<select>` elements for date-like options (day/month names or numeric dates). Uses `parseOptionDate` helper for robust parsing including MM/DD/YYYY format. Extracts and sorts available dates.
 - `rescheduleInspection(page, targetDate)` — Selects the new date in the Inspection Date dropdown and clicks "Resubmit Request" on the Modify page.
 - `cleanupOldScreenshots()` — Automatically deletes oldest screenshots when count exceeds MAX_SCREENSHOTS (default 50). Called before every new screenshot.

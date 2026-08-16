@@ -17,6 +17,7 @@ const {
   fetchAutomationSettings,
 } = require('./api');
 const notify = require('./notify');
+const { toLocalMidnight, parseFlexibleDate } = require('./dates');
 
 const DEFAULT_NOTICE_HOURS = 24;
 
@@ -33,10 +34,6 @@ function backoffDelay(attempt) {
   const delay = Math.min(backoffBaseMs * Math.pow(2, attempt), backoffMaxMs);
   const withJitter = delay * (0.5 + Math.random());
   return Math.floor(withJitter);
-}
-
-function toLocalMidnight(year, month, day) {
-  return new Date(year, month, day, 0, 0, 0, 0);
 }
 
 function todayLocalMidnight() {
@@ -56,30 +53,6 @@ function getEarliestAllowedDate(noticeHours) {
   const floor = toLocalMidnight(cutoff.getFullYear(), cutoff.getMonth(), cutoff.getDate());
   if (floor.getTime() < cutoff.getTime()) floor.setDate(floor.getDate() + 1);
   return floor;
-}
-
-function parseFlexibleDate(dateStr) {
-  if (!dateStr) return null;
-  const s = String(dateStr).trim();
-  if (!s) return null;
-  const currentYear = new Date().getFullYear();
-
-  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (isoMatch) return toLocalMidnight(parseInt(isoMatch[1], 10), parseInt(isoMatch[2], 10) - 1, parseInt(isoMatch[3], 10));
-
-  const mdyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
-  if (mdyMatch) {
-    const [, m, d, y] = mdyMatch;
-    const fullYear = y.length === 2 ? 2000 + parseInt(y, 10) : parseInt(y, 10);
-    return toLocalMidnight(fullYear, parseInt(m, 10) - 1, parseInt(d, 10));
-  }
-
-  let parsed = new Date(s);
-  if (isNaN(parsed.getTime())) parsed = new Date(`${s}, ${currentYear}`);
-  if (isNaN(parsed.getTime())) parsed = new Date(`${s} ${currentYear}`);
-  if (isNaN(parsed.getTime())) return null;
-  const yr = parsed.getFullYear() < 2020 ? currentYear : parsed.getFullYear();
-  return toLocalMidnight(yr, parsed.getMonth(), parsed.getDate());
 }
 
 async function processInspection(page, inspection) {
@@ -112,7 +85,11 @@ async function processInspection(page, inspection) {
     };
   }
 
-  const nav = await navigateToInspections(page, permitNumber, { confirmationNumber });
+  const nav = await navigateToInspections(page, permitNumber, {
+    confirmationNumber,
+    currentScheduledDate,
+    inspectionType,
+  });
 
   if (nav.status === 'no_inspection_time') {
     return { inspectionId: id, permitNumber, status: 'no_inspection_time' };
